@@ -18,7 +18,66 @@ _hy2_hop_load() {
     [ -n "$HOP_MIN" ] && [ -n "$HOP_MAX" ] && [ -n "$HOP_PORT" ]
 }
 
+# 开机恢复：ufw/firewalld 不会保存手动加的 nat 规则，persist_iptables 在它们启用时也会跳过，
+# 所以单独装一个开机服务，按 hy2_hop.conf 把 DNAT 规则补回来（-C 检查，已存在则不重复添加）
+HY2_HOP_RESTORE="${work_dir}/hy2-hop-restore.sh"
+_hy2_hop_boot_enable() {
+    cat > "$HY2_HOP_RESTORE" << 'REOF'
+#!/bin/sh
+f=/etc/sing-box/hy2_hop.conf
+[ -f "$f" ] || exit 0
+. "$f"
+[ -n "$HOP_MIN" ] && [ -n "$HOP_MAX" ] && [ -n "$HOP_PORT" ] || exit 0
+for c in iptables ip6tables; do
+    command -v "$c" >/dev/null 2>&1 || continue
+    "$c" -t nat -C PREROUTING -p udp --dport "${HOP_MIN}:${HOP_MAX}" -j DNAT --to-destination ":${HOP_PORT}" 2>/dev/null \
+        || "$c" -t nat -A PREROUTING -p udp --dport "${HOP_MIN}:${HOP_MAX}" -j DNAT --to-destination ":${HOP_PORT}" 2>/dev/null
+done
+exit 0
+REOF
+    chmod 700 "$HY2_HOP_RESTORE"
+    if command_exists rc-service; then
+        cat > /etc/init.d/sb-hy2-hop << 'OEOF'
+#!/sbin/openrc-run
+description="restore sing-box hysteria2 port hopping rules"
+depend() { need net; after firewall iptables ip6tables sb-iptables; }
+start() { /etc/sing-box/hy2-hop-restore.sh; return 0; }
+OEOF
+        chmod +x /etc/init.d/sb-hy2-hop
+        rc-update add sb-hy2-hop default >/dev/null 2>&1 || true
+    elif command_exists systemctl; then
+        cat > /etc/systemd/system/sb-hy2-hop.service << 'SEOF'
+[Unit]
+Description=Restore sing-box hysteria2 port hopping rules
+After=network-online.target ufw.service firewalld.service netfilter-persistent.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/etc/sing-box/hy2-hop-restore.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+SEOF
+        systemctl daemon-reload >/dev/null 2>&1
+        systemctl enable sb-hy2-hop >/dev/null 2>&1 || true
+    fi
+}
+_hy2_hop_boot_disable() {
+    if command_exists rc-service; then
+        rc-update del sb-hy2-hop default >/dev/null 2>&1 || true
+        rm -f /etc/init.d/sb-hy2-hop
+    elif command_exists systemctl; then
+        systemctl disable sb-hy2-hop >/dev/null 2>&1 || true
+        rm -f /etc/systemd/system/sb-hy2-hop.service
+        systemctl daemon-reload >/dev/null 2>&1
+    fi
+    rm -f "$HY2_HOP_RESTORE"
+}
+
 hy2_hop_del() {
+    _hy2_hop_boot_disable
     _hy2_hop_load || { rm -f "$HY2_HOP_CONF"; return 0; }
     local c
     for c in iptables ip6tables; do
@@ -36,6 +95,7 @@ hy2_hop_add() {
             || "$c" -t nat -A PREROUTING -p udp --dport "${min}:${max}" -j DNAT --to-destination ":${port}" >/dev/null 2>&1
     done
     printf 'HOP_MIN=%s\nHOP_MAX=%s\nHOP_PORT=%s\n' "$min" "$max" "$port" > "$HY2_HOP_CONF"
+    _hy2_hop_boot_enable
 }
 
 # HY2 监听端口变更后：把跳跃规则的 DNAT 目标同步到新端口，并更新链接里的 mport
@@ -280,18 +340,30 @@ change_config() {
             purple "端口跳跃需确保跳跃区间的端口没有被占用\n"
             reading "请输入跳跃起始端口 (回车跳过将使用随机端口): " min_port
             [ -z "$min_port" ] && min_port=$(shuf -i 50000-65000 -n 1)
+            if ! [[ "$min_port" =~ ^[0-9]+$ ]] || [ "$min_port" -lt 1024 ] || [ "$min_port" -gt 65534 ]; then
+                red "起始端口无效：需为 1024-65534 的数字"; return 1
+            fi
             yellow "你的起始端口为：$min_port"
-            reading "\n请输入跳跃结束端口 (需大于起始端口): " max_port
-            [ -z "$max_port" ] && max_port=$(($min_port + 100))
+            reading "\n请输入跳跃结束端口 (需大于起始端口，回车=起始+100): " max_port
+            if [ -z "$max_port" ]; then
+                max_port=$((min_port + 100)); [ "$max_port" -gt 65535 ] && max_port=65535
+            fi
             yellow "你的结束端口为：$max_port\n"
-            if ! [[ "$min_port" =~ ^[0-9]+$ && "$max_port" =~ ^[0-9]+$ ]] \
-               || [ "$min_port" -lt 1 ] || [ "$max_port" -gt 65535 ] || [ "$min_port" -ge "$max_port" ]; then
-                red "端口范围无效：需为 1-65535 的数字，且结束端口大于起始端口"; return 1
+            if ! [[ "$max_port" =~ ^[0-9]+$ ]] || [ "$max_port" -gt 65535 ] || [ "$min_port" -ge "$max_port" ]; then
+                red "端口范围无效：结束端口需为不超过 65535 的数字，且大于起始端口"; return 1
             fi
             local listen_port
             listen_port=$(jq -r '.inbounds[] | select(.type == "hysteria2").listen_port' "${conf_dir}/inbounds.json" 2>/dev/null | head -1)
             if ! [[ "$listen_port" =~ ^[0-9]+$ ]]; then
                 red "未找到 hysteria2 入站（可能已选择跳过直连）"; return 1
+            fi
+            # 区间不能盖住本脚本任何 UDP 入站端口（含 HY2 自身、TUIC），否则这些端口的流量会被 DNAT 走
+            local _p _clash=""
+            for _p in $(jq -r '.inbounds[] | select(.listen_port != null) | .listen_port' "${conf_dir}/inbounds.json" 2>/dev/null); do
+                if [ "$_p" -ge "$min_port" ] && [ "$_p" -le "$max_port" ]; then _clash="${_clash} ${_p}"; fi
+            done
+            if [ -n "$_clash" ]; then
+                red "跳跃区间 ${min_port}-${max_port} 包含已用入站端口:${_clash}，请换一个区间"; return 1
             fi
             hy2_hop_del
             hy2_hop_add "$min_port" "$max_port" "$listen_port"

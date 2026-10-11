@@ -43,3 +43,10 @@
 - ufw 或 firewalld 在用时，不再自动安装 iptables-persistent。
 - nginx 重启：运行中且 `nginx -t` 通过时用 reload，不再杀掉全部 nginx 进程。
 - `sb` 快捷方式的临时脚本放进独立临时目录。
+
+## HY2 端口跳跃补丁（2026-10-12）
+- 开机自动恢复：新增 `hy2-hop-restore.sh` + 开机服务（systemd `sb-hy2-hop.service` / OpenRC `sb-hy2-hop`），按 `hy2_hop.conf` 补回 DNAT 规则。修复 ufw/firewalld 在用时 `persist_iptables` 跳过保存、重启后跳跃失效的问题
+- 删除跳跃时同步移除开机服务与恢复脚本
+- 输入校验前置：先校验起始端口再计算默认结束端口；默认结束端口不超过 65535；起始端口限定 1024-65534
+- 新增区间冲突检查：跳跃区间包含任何已用入站端口（HY2 自身、TUIC 等）时拒绝
+- 卸载（菜单卸载 / 自动卸载）时清除跳跃 DNAT 规则与开机服务，不再残留

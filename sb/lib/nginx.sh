@@ -611,6 +611,7 @@ uninstall_singbox() {
                 systemctl disable "${server_name}"; systemctl disable argo
                 systemctl daemon-reload || true
             fi
+            command -v hy2_hop_del >/dev/null 2>&1 && { hy2_hop_del; command -v persist_iptables >/dev/null 2>&1 && persist_iptables; } >/dev/null 2>&1 || true   # 卸载时移除端口跳跃 DNAT 与开机服务
             rm -rf "${work_dir}" || true
             rm -f /etc/systemd/system/sing-box.service /etc/systemd/system/argo.service
             rm -f /etc/nginx/conf.d/sing-box.conf /etc/nginx/conf.d/argo-ws.conf /etc/nginx/conf.d/sb-sub.conf

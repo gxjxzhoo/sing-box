@@ -473,6 +473,7 @@ auto_uninstall() {
               /etc/systemd/system/argo.service
     fi
 
+    command -v hy2_hop_del >/dev/null 2>&1 && { hy2_hop_del; command -v persist_iptables >/dev/null 2>&1 && persist_iptables; } >/dev/null 2>&1 || true   # 卸载时移除端口跳跃 DNAT 与开机服务
     rm -rf "${work_dir}"
     rm -f /usr/bin/sb
 
