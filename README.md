@@ -1,13 +1,36 @@
 # sing-box
 
-sing-box 多协议一键安装脚本（模块化）。
+sing-box 一键脚本（单文件 `sb.sh`，v3）。
 
-## 一键安装
+- 直连入站：VLESS-Reality、Hysteria2、TUIC v5、AnyTLS
+- Argo：VLESS-WS 经 Cloudflare 隧道（临时隧道或固定 Token），只监听 127.0.0.1，不装 Nginx、不对公网开订阅
+- sing-box / cloudflared 均从官方 GitHub Release 下载并校验 sha256
+- 安装后 `sb` 命令运行本机副本，不再每次联网拉脚本
+- 支持 systemd / OpenRC（Alpine 需先 `apk add bash curl`）
+
+## 安装
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/gxjxzhoo/sing-box/refs/heads/main/sb/sb.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/gxjxzhoo/sing-box/main/sb.sh) install
 ```
 
-## 目录
+免交互示例：
 
-- `sb/`：模块化脚本（入口 `sb.sh` + `lib/`），详见 `sb/README.md`
+```bash
+PORT=20000 ARGO_TOKEN=xxx ARGO_DOMAIN=sb.example.com \
+  bash <(curl -fsSL https://raw.githubusercontent.com/gxjxzhoo/sing-box/main/sb.sh) install
+```
+
+## 常用命令
+
+```bash
+sb               # 菜单
+sb nodes         # 查看节点
+sb set PORT=30000 UUID=...      # 改设置并重建
+sb set PROTOCOLS=reality,hy2    # 只开部分协议
+sb restart | status | update | uninstall
+```
+
+固定隧道：在 Cloudflare Zero Trust 把域名的 Public Hostname 指向 `http://localhost:<ARGO_PORT>`（`sb nodes` 会提示端口）。
+
+旧版模块化脚本仍在 `sb/` 目录。
