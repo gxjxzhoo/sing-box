@@ -13,12 +13,12 @@
     <link rel="stylesheet" href="hark.css" />
     <link rel="stylesheet" href="hark-hero.css" />
     <style>
-      .x-form { display: grid; gap: 16px; }
+      .x-form, .x-out { display: grid; gap: 16px; }
       .x-form [hidden], .x-out [hidden] { display: none !important; }
       .x-panel { padding: 20px; border-radius: var(--r-m); background: var(--fill-tertiary); display: grid; gap: 14px; min-width: 0; }
-      .x-panel[hidden] { display: none; }
       .x-panel h3 { font: var(--type-heading); }
-      .x-panel__top { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
+      .x-panel h3 small { font: var(--type-small); color: var(--text-secondary); }
+      .x-top { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
       .x-hint { font: var(--type-caption); color: var(--text-secondary); }
       .x-err { font: var(--type-tag); color: var(--fill-system-red); }
       .x-err:empty { display: none; }
@@ -29,38 +29,39 @@
       .x-chip:has(input:checked) { background: var(--fill-primary); color: var(--text-primary-on); border-color: var(--fill-primary); }
       .x-chip:has(input:checked) b { background: var(--fill-primary-on); border-color: var(--fill-primary-on); color: var(--text-primary); }
       .x-chip input[type="checkbox"]:checked + b::after { content: "✓"; }
+      .x-chip input[type="radio"]:checked + b { background: var(--fill-system-green); border-color: var(--fill-system-green); }
       .x-chip:has(input:focus-visible) { outline: 2px solid var(--fill-primary); outline-offset: 2px; }
+      .x-radios { display: flex; flex-wrap: wrap; gap: 8px; }
+      .x-radios .x-chip { flex: 1 1 140px; }
       .x-field { display: grid; gap: 6px; min-width: 0; }
       .x-field > label, .x-label { font: var(--type-label); }
-      .x-label small { color: var(--text-secondary); font-weight: var(--weight-regular); }
+      .x-field small { color: var(--text-secondary); font-weight: var(--weight-regular); }
       .x-row { display: flex; gap: 8px; align-items: stretch; }
-      .x-row .x-input { flex: 1; min-width: 0; }
+      .x-row > .x-input, .x-row > .x-code { flex: 1; min-width: 0; }
       .x-input { width: 100%; min-height: var(--tap); padding: 8px 12px; border-radius: var(--r-s); border: 1px solid var(--stroke-primary); background: var(--fill-primary-on); color: var(--text-primary); font: var(--type-body); font-size: 16px; font-family: "Geist Mono", ui-monospace, monospace; }
       select.x-input { font-family: var(--sans); }
       .x-input:focus { outline: 2px solid var(--fill-primary); outline-offset: 1px; }
       .x-input.is-bad { border-color: var(--fill-system-red); }
       .x-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 200px), 1fr)); gap: 12px; }
-      .x-radios { display: flex; flex-wrap: wrap; gap: 8px; }
-      .x-radios .x-chip { flex: 1 1 140px; }
-      .x-chip input[type="radio"]:checked ~ b { background: var(--fill-system-green); border-color: var(--fill-system-green); }
       .x-switch { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: var(--tap); cursor: pointer; font: var(--type-label); }
-      .x-switch input { appearance: none; -webkit-appearance: none; width: 48px; height: 28px; border-radius: var(--r-pill); background: var(--transparent-primary); position: relative; flex: none; cursor: pointer; transition: background var(--dur-quick) var(--ease-out); margin: 0; }
-      .x-switch input::after { content: ""; position: absolute; top: 3px; left: 3px; width: 22px; height: 22px; border-radius: 50%; background: #fff; transition: transform var(--dur-quick) var(--ease-out); }
+      .x-switch input { appearance: none; -webkit-appearance: none; width: 48px; height: 28px; margin: 0; border-radius: var(--r-pill); background: var(--transparent-primary); position: relative; flex: none; cursor: pointer; transition: background var(--dur-quick) var(--ease-out); }
+      .x-switch input::after { content: ""; position: absolute; top: 3px; left: 3px; width: 22px; height: 22px; border-radius: 50%; background: var(--fill-primary-on); transition: transform var(--dur-quick) var(--ease-out); }
       .x-switch input:checked { background: var(--fill-system-green); }
       .x-switch input:checked::after { transform: translateX(20px); }
-      .x-details { border-top: 1px solid var(--stroke-primary); padding-top: 4px; }
+      .x-switch input:focus-visible { outline: 2px solid var(--fill-primary); outline-offset: 2px; }
       .x-details > summary { min-height: var(--tap); display: flex; align-items: center; gap: 8px; font: var(--type-label); cursor: pointer; list-style: none; }
       .x-details > summary::-webkit-details-marker { display: none; }
       .x-details > summary::before { content: "\203A"; display: inline-block; width: 12px; transition: transform var(--dur-quick) var(--ease-out); }
       .x-details[open] > summary::before { transform: rotate(90deg); }
+      .x-details--sub { border-top: 1px solid var(--stroke-primary); padding-top: 4px; }
+      .x-details--main > summary { font: var(--type-heading); }
       .x-details__body { display: grid; gap: 12px; padding: 4px 0 8px; }
-      .x-out { display: grid; gap: 16px; }
-      .x-out__grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 260px), 1fr)); gap: 16px; }
-      .x-code { margin: 0; padding: 14px 16px; border-radius: var(--r-s); background: var(--fill-primary-on); border: 1px solid var(--stroke-primary); font: 400 14px/1.5 "Geist Mono", ui-monospace, monospace; white-space: pre-wrap; word-break: break-all; overflow-wrap: anywhere; user-select: text; -webkit-user-select: text; }
+      .x-cmds { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 300px), 1fr)); gap: 12px; }
+      .x-cmds .x-panel { gap: 8px; padding: 16px; }
+      .x-cmds p { font: var(--type-small); color: var(--text-secondary); }
+      .x-code { margin: 0; padding: 12px 14px; border-radius: var(--r-s); background: var(--fill-primary-on); border: 1px solid var(--stroke-primary); font: 400 14px/1.5 "Geist Mono", ui-monospace, monospace; white-space: pre-wrap; word-break: break-all; overflow-wrap: anywhere; user-select: text; -webkit-user-select: text; }
       .x-code.is-off { color: var(--text-secondary); font-family: var(--sans); }
-      .x-warn { padding: 12px 14px; border-radius: var(--r-s); background: color-mix(in srgb, #ffc400 22%, var(--fill-primary-on)); border: 1px solid color-mix(in srgb, #ffc400 60%, transparent); font: var(--type-small); }
-      .x-warn[hidden] { display: none; }
-      .x-pw { position: relative; }
+      .x-warn { padding: 12px 14px; border-radius: var(--r-s); background: color-mix(in srgb, var(--fill-system-orange) 16%, var(--fill-primary-on)); border: 1px solid var(--stroke-system-orange); font: var(--type-small); }
       button.btn { cursor: pointer; }
       button.btn:disabled { opacity: 0.45; cursor: not-allowed; }
     </style>
@@ -71,9 +72,9 @@
       <main class="main">
         <section class="hero">
           <div class="hero__copy">
-            <p class="hero__eyebrow">纯本地生成 · 不联网</p>
+            <p class="hero__eyebrow">纯本地生成 · 不联网 · 脚本 v3.10.1</p>
             <h1>sing-box 一键安装命令生成器</h1>
-            <p class="hero__sub">勾选协议与参数，复制命令到 VPS 以 root 运行</p>
+            <p class="hero__sub">勾选协议与参数，生成一条命令，复制到 VPS 以 root 运行。</p>
           </div>
         </section>
 
@@ -81,19 +82,20 @@
           <div class="head"><h2>选择协议和参数</h2></div>
           <form class="x-form" id="f" autocomplete="off" onsubmit="return false">
             <div class="x-panel">
-              <div class="x-panel__top">
-                <h3>1. 协议</h3>
+              <div class="x-top">
+                <h3>协议</h3>
                 <div class="links">
                   <button type="button" class="btn" id="allBtn">全选</button>
                   <button type="button" class="btn" id="defBtn">默认</button>
                 </div>
               </div>
               <div class="x-chips" id="protos"></div>
+              <p class="x-hint">Argo 隧道同时输出 VLESS / VMess / Trojan 三个节点。</p>
               <p class="x-err" id="protoErr"></p>
             </div>
 
             <div class="x-panel">
-              <h3>2. UUID</h3>
+              <h3>UUID</h3>
               <div class="x-field">
                 <div class="x-row">
                   <input class="x-input" id="uuid" type="text" spellcheck="false" aria-label="UUID" />
@@ -104,19 +106,19 @@
             </div>
 
             <div class="x-panel">
-              <h3>3. 端口</h3>
+              <h3>端口</h3>
               <div class="x-field">
                 <label for="port">起始端口 PORT</label>
                 <div class="x-row">
                   <input class="x-input" id="port" type="number" inputmode="numeric" min="1" max="65535" />
                   <button type="button" class="btn" id="portBtn">随机</button>
                 </div>
-                <p class="x-hint">Hy2=PORT，Reality=+1，TUIC=+2，Trojan=+3，VMess=+4，SS=+5，AnyTLS=+6，ShadowTLS=+7，Socks5=+8</p>
+                <p class="x-hint">Hy2=PORT，Reality +1，TUIC +2，Trojan +3，VMess +4，SS +5，AnyTLS +6，ShadowTLS +7，Socks5 +8</p>
               </div>
-              <details class="x-details">
+              <details class="x-details x-details--sub">
                 <summary>单独指定端口</summary>
                 <div class="x-details__body">
-                  <p class="x-hint">留空则用起始端口推算的默认值。</p>
+                  <p class="x-hint">留空则用起始端口推算的值。</p>
                   <div class="x-grid" id="ports"></div>
                   <p class="x-hint" id="noPorts" hidden>未选择直连协议。</p>
                 </div>
@@ -125,13 +127,10 @@
             </div>
 
             <div class="x-panel" id="argoPanel">
-              <h3>4. Argo 隧道 <small>（VLESS/VMess/Trojan 全部输出）</small></h3>
-              <div class="x-field">
-                <span class="x-label">隧道类型</span>
-                <div class="x-radios" role="radiogroup" aria-label="隧道类型">
-                  <label class="x-chip"><input type="radio" name="tun" value="temp" checked /><b></b>临时隧道</label>
-                  <label class="x-chip"><input type="radio" name="tun" value="fixed" /><b></b>固定隧道</label>
-                </div>
+              <h3>Argo 隧道</h3>
+              <div class="x-radios" role="radiogroup" aria-label="隧道类型">
+                <label class="x-chip"><input type="radio" name="tun" value="temp" checked /><b></b>临时隧道</label>
+                <label class="x-chip"><input type="radio" name="tun" value="fixed" /><b></b>固定隧道</label>
               </div>
               <div id="fixedBox" class="x-form" hidden>
                 <div class="x-field">
@@ -150,12 +149,12 @@
               <div class="x-field">
                 <label for="argoPort">ARGO_PORT <small>可选，本地端口</small></label>
                 <input class="x-input" id="argoPort" type="number" inputmode="numeric" min="1" max="65535" placeholder="8001" />
-                <p class="x-hint">只监听 127.0.0.1；固定隧道在 Cloudflare 里填 HTTP → 127.0.0.1:此端口（路径留空）</p>
+                <p class="x-hint">只监听 127.0.0.1。固定隧道在 Cloudflare 只需一条路由：HTTP → 127.0.0.1:此端口，路径留空（节点和订阅共用）。</p>
                 <p class="x-err" id="argoPortErr"></p>
               </div>
               <div class="x-field">
                 <label class="x-switch">Argo 订阅 <input type="checkbox" id="sub" checked role="switch" /></label>
-                <p class="x-hint">订阅只经 Argo 域名访问，不开公网端口；固定隧道需在 Cloudflare 按安装提示加一条路径路由</p>
+                <p class="x-hint">订阅只经 Argo 域名访问，不开公网端口。</p>
               </div>
               <div class="x-grid">
                 <div class="x-field">
@@ -170,8 +169,22 @@
             </div>
 
             <div class="x-panel">
-              <details class="x-details" style="border-top: 0; padding-top: 0">
-                <summary><span style="font: var(--type-heading)">高级设置</span></summary>
+              <h3>WARP 出站</h3>
+              <div class="x-radios" role="radiogroup" aria-label="WARP 出站">
+                <label class="x-chip"><input type="radio" name="warp" value="" checked /><b></b>关闭</label>
+                <label class="x-chip"><input type="radio" name="warp" value="ai" /><b></b>仅 AI 与流媒体</label>
+                <label class="x-chip"><input type="radio" name="warp" value="all" /><b></b>全部走 WARP</label>
+              </div>
+              <p class="x-hint">AI 与流媒体：ChatGPT、Claude、Gemini、Netflix、Disney+ 等。安装时自动免费注册 WARP 账号。</p>
+              <div class="x-field" id="warpDomBox" hidden>
+                <label for="warpDom">WARP_DOMAINS <small>可选，额外域名后缀，逗号分隔</small></label>
+                <input class="x-input" id="warpDom" type="text" spellcheck="false" placeholder="example.com,foo.org" />
+              </div>
+            </div>
+
+            <div class="x-panel">
+              <details class="x-details x-details--main">
+                <summary>高级设置</summary>
                 <div class="x-details__body">
                   <div class="x-field">
                     <label for="name">NAME 节点名前缀</label>
@@ -180,19 +193,22 @@
                   <div class="x-field">
                     <label for="ipMode">IP_MODE</label>
                     <select class="x-input" id="ipMode">
-                      <option value="auto" selected>auto（优先 IPv4）</option>
+                      <option value="auto" selected>auto（默认）</option>
                       <option value="4">4</option>
                       <option value="6">6</option>
                       <option value="both">both</option>
                     </select>
                   </div>
                   <div class="x-field" id="sniBox">
-                    <label for="sni">SNI Reality 偷取站点</label>
+                    <label for="sni">SNI <small>Reality 偷取站点</small></label>
                     <input class="x-input" id="sni" type="text" spellcheck="false" placeholder="www.iij.ad.jp" />
                   </div>
                   <div class="x-field">
-                    <label for="ver">SB_VERSION 固定内核版本</label>
+                    <label for="ver">SB_VERSION <small>固定内核版本</small></label>
                     <input class="x-input" id="ver" type="text" spellcheck="false" placeholder="留空=最新，如 1.12.9" />
+                  </div>
+                  <div class="x-field">
+                    <label class="x-switch">TUNE 系统调优（BBR + UDP） <input type="checkbox" id="tune" checked role="switch" /></label>
                   </div>
                 </div>
               </details>
@@ -204,38 +220,47 @@
           <div class="head"><h2>复制命令到 VPS</h2></div>
           <div class="x-out">
             <div class="x-panel">
-              <div class="x-panel__top">
+              <div class="x-top">
                 <h3>安装命令</h3>
-                <div class="links"><button type="button" class="btn" data-copy="cmd">复制</button></div>
+                <button type="button" class="btn" id="cmdBtn" data-copy="cmd">复制</button>
               </div>
               <pre class="x-code" id="cmd"></pre>
-              <p class="x-warn" id="tokWarn" hidden>命令已自动以空格开头，Debian/Ubuntu 默认不记入 shell 历史；其他系统运行后可执行 history -c</p>
+              <p class="x-warn" id="tokWarn" hidden>命令已以空格开头，Debian/Ubuntu 默认不记入历史；其他系统运行后可执行 history -c。</p>
               <p class="fineprint">需要 root；Alpine 先执行 apk add bash curl。可重复运行：已安装时保留原设置，命令里的参数优先。</p>
             </div>
-            <div class="x-out__grid">
-              <div class="x-panel">
-                <div class="x-panel__top">
-                  <h3>查看节点 / 订阅</h3>
-                  <div class="links"><button type="button" class="btn" data-copy="c2">复制</button></div>
-                </div>
-                <pre class="x-code" id="c2">sb nodes</pre>
-                <p class="fineprint">安装完成后也会直接打印节点、Base64 和 Argo 订阅链接</p>
-              </div>
-              <div class="x-panel">
-                <div class="x-panel__top">
-                  <h3>管理菜单</h3>
-                  <div class="links"><button type="button" class="btn" data-copy="c3">复制</button></div>
-                </div>
-                <pre class="x-code" id="c3">sb</pre>
-              </div>
-              <div class="x-panel">
-                <div class="x-panel__top">
-                  <h3>卸载</h3>
-                  <div class="links"><button type="button" class="btn" data-copy="c4">复制</button></div>
-                </div>
-                <pre class="x-code" id="c4">sb uninstall</pre>
-              </div>
-            </div>
+          </div>
+        </section>
+
+        <section class="section" id="cmds" data-nav="常用">
+          <div class="head"><h2>安装后的常用命令</h2></div>
+          <div class="x-cmds">
+            <div class="x-panel"><p>管理菜单</p><div class="x-row"><pre class="x-code">sb</pre><button type="button" class="btn" data-copy>复制</button></div></div>
+            <div class="x-panel"><p>查看节点 / 订阅</p><div class="x-row"><pre class="x-code">sb nodes</pre><button type="button" class="btn" data-copy>复制</button></div></div>
+            <div class="x-panel"><p>运行状态</p><div class="x-row"><pre class="x-code">sb status</pre><button type="button" class="btn" data-copy>复制</button></div></div>
+            <div class="x-panel"><p>更新脚本并自动刷新配置</p><div class="x-row"><pre class="x-code">sb upgrade</pre><button type="button" class="btn" data-copy>复制</button></div></div>
+            <div class="x-panel"><p>安装后开关 WARP（可为 ai / all / 0）</p><div class="x-row"><pre class="x-code">sb set WARP=ai</pre><button type="button" class="btn" data-copy>复制</button></div></div>
+            <div class="x-panel"><p>改优选地址</p><div class="x-row"><pre class="x-code">sb set CFIP=地址 CFPORT=443</pre><button type="button" class="btn" data-copy>复制</button></div></div>
+            <div class="x-panel"><p>改 Argo 本地端口</p><div class="x-row"><pre class="x-code">sb set ARGO_PORT=8001</pre><button type="button" class="btn" data-copy>复制</button></div></div>
+            <div class="x-panel"><p>卸载</p><div class="x-row"><pre class="x-code">sb uninstall</pre><button type="button" class="btn" data-copy>复制</button></div></div>
+          </div>
+        </section>
+
+        <section class="section" id="menu" data-nav="菜单">
+          <div class="head"><h2>sb 菜单速查</h2></div>
+          <div class="prose">
+            <ol>
+              <li>节点 / 订阅</li>
+              <li>协议</li>
+              <li>端口</li>
+              <li>UUID</li>
+              <li>节点 IP</li>
+              <li>Argo 隧道 / 订阅（含改本地端口、优选地址）</li>
+              <li>WARP 出站</li>
+              <li>重启</li>
+              <li>更新</li>
+              <li>重装（保留设置）</li>
+              <li>卸载</li>
+            </ol>
           </div>
         </section>
       </main>
@@ -264,25 +289,24 @@
         var SCRIPT = "bash <(curl -fsSL https://raw.githubusercontent.com/gxjxzhoo/sing-box/main/sb.sh) install </dev/null";
         var UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
         var $ = function (id) { return document.getElementById(id); };
+        var val = function (id) { return $(id).value.trim(); };
+        var q = function (v) { return "'" + String(v).replace(/'/g, "'\\''") + "'"; };
+        var okPort = function (s) { return /^\d+$/.test(s) && +s >= 1 && +s <= 65535; };
+        var radio = function (n) { return document.querySelector('input[name="' + n + '"]:checked').value; };
         var form = $("f");
 
-        // build protocol chips and port inputs
-        var protoBox = $("protos"), portsBox = $("ports");
         P.forEach(function (p) {
           var lab = document.createElement("label");
           lab.className = "x-chip";
-          lab.innerHTML = '<input type="checkbox" value="' + p.k + '"' + (DEF.indexOf(p.k) > -1 ? " checked" : "") + " /><b aria-hidden=\"true\"></b>" + p.n;
-          protoBox.appendChild(lab);
+          lab.innerHTML = '<input type="checkbox" value="' + p.k + '"' + (DEF.indexOf(p.k) > -1 ? " checked" : "") + ' /><b aria-hidden="true"></b>' + p.n;
+          $("protos").appendChild(lab);
           p.cb = lab.querySelector("input");
-          if (p.env) {
-            var d = document.createElement("div");
-            d.className = "x-field";
-            d.innerHTML = '<label for="p_' + p.k + '">' + p.env + " <small>" + p.n + "</small></label>" +
-              '<input class="x-input" id="p_' + p.k + '" type="number" inputmode="numeric" min="1" max="65535" />';
-            portsBox.appendChild(d);
-            p.box = d;
-            p.inp = d.querySelector("input");
-          }
+          if (!p.env) return;
+          p.box = document.createElement("div");
+          p.box.className = "x-field";
+          p.box.innerHTML = '<label for="p_' + p.k + '">' + p.env + " <small>" + p.n + '</small></label><input class="x-input" id="p_' + p.k + '" type="number" inputmode="numeric" min="1" max="65535" />';
+          $("ports").appendChild(p.box);
+          p.inp = p.box.querySelector("input");
         });
 
         function uuid() {
@@ -294,9 +318,11 @@
           return h.slice(0, 8) + "-" + h.slice(8, 12) + "-" + h.slice(12, 16) + "-" + h.slice(16, 20) + "-" + h.slice(20);
         }
         function rport() { return 10000 + Math.floor(Math.random() * 50001); }
-        function q(v) { return "'" + String(v).replace(/'/g, "'\\''") + "'"; }
-        function val(id) { return $(id).value.trim(); }
-        function validPort(s) { return /^\d+$/.test(s) && +s >= 1 && +s <= 65535; }
+        function mark(id, err, msgId) {
+          $(id).classList.toggle("is-bad", !!err);
+          if (msgId) $(msgId).textContent = err || "";
+          return !err;
+        }
 
         $("uuid").value = uuid();
         $("port").value = rport();
@@ -304,49 +330,41 @@
         function update() {
           var sel = P.filter(function (p) { return p.cb.checked; });
           var has = function (k) { return sel.some(function (p) { return p.k === k; }); };
-          var argo = has("argo");
-          var fixed = form.querySelector('input[name="tun"]:checked').value === "fixed";
+          var argo = has("argo"), fixed = radio("tun") === "fixed", warp = radio("warp");
           var ok = true;
 
           $("argoPanel").hidden = !argo;
           $("fixedBox").hidden = !fixed;
           $("sniBox").hidden = !has("reality");
-
-          // protocols
+          $("warpDomBox").hidden = warp !== "ai";
           $("allBtn").textContent = sel.length === P.length ? "取消全选" : "全选";
+
           $("protoErr").textContent = sel.length ? "" : "请至少选择一个协议";
           if (!sel.length) ok = false;
 
-          // uuid
-          var u = val("uuid"), uBad = !UUID_RE.test(u);
-          $("uuid").classList.toggle("is-bad", uBad);
-          $("uuidErr").textContent = uBad ? "UUID 格式不正确" : "";
-          if (uBad) ok = false;
+          var u = val("uuid");
+          if (!mark("uuid", UUID_RE.test(u) ? "" : "UUID 格式不正确", "uuidErr")) ok = false;
 
           // ports
-          var base = val("port"), errs = [];
-          var baseOk = validPort(base);
-          $("port").classList.toggle("is-bad", !baseOk);
+          var base = val("port"), baseOk = okPort(base), errs = [], used = {}, anyDirect = false;
+          mark("port", !baseOk);
           if (!baseOk) errs.push("起始端口须为 1–65535");
-          var used = {}, anyDirect = false;
           P.forEach(function (p) {
             if (!p.env) return;
-            var on = p.cb.checked;
+            var on = p.cb.checked, def = baseOk ? +base + p.off : 0, s = p.inp.value.trim(), eff;
             p.box.hidden = !on;
-            var def = baseOk ? +base + p.off : "";
-            p.inp.placeholder = def === "" ? "" : (def > 65535 ? "超出范围" : String(def));
-            if (!on) { p.inp.classList.remove("is-bad"); return; }
+            p.inp.placeholder = !def ? "" : def > 65535 ? "超出范围" : String(def);
+            p.inp.classList.remove("is-bad");
+            if (!on) return;
             anyDirect = true;
-            var s = p.inp.value.trim(), eff;
             if (s) {
-              if (!validPort(s)) { errs.push(p.env + " 须为 1–65535"); p.inp.classList.add("is-bad"); return; }
+              if (!okPort(s)) { errs.push(p.env + " 须为 1–65535"); p.inp.classList.add("is-bad"); return; }
               eff = +s;
             } else {
               if (!baseOk) return;
               eff = def;
-              if (eff > 65535) { errs.push(p.n + " 默认端口 " + eff + " 超出 65535，请调小起始端口或单独指定"); return; }
+              if (eff > 65535) { errs.push(p.n + " 推算端口 " + eff + " 超出 65535，请调小起始端口或单独指定"); return; }
             }
-            p.inp.classList.remove("is-bad");
             (used[eff] = used[eff] || []).push(p.n);
           });
           Object.keys(used).forEach(function (k) {
@@ -356,52 +374,42 @@
           $("portErr").textContent = errs.join("；");
           if (errs.length) ok = false;
 
-          // argo domain
-          var dom = val("argoDomain"), domBad = argo && fixed && !dom;
-          $("argoDomain").classList.toggle("is-bad", domBad);
-          $("domainErr").textContent = domBad ? "固定隧道需要填写 ARGO_DOMAIN" : "";
-          if (domBad) ok = false;
+          var dom = val("argoDomain");
+          if (!mark("argoDomain", argo && fixed && !dom ? "固定隧道需要填写 ARGO_DOMAIN" : "", "domainErr")) ok = false;
 
-          // argo port
           var ap = val("argoPort"), apErr = "";
           if (argo && ap) {
-            if (!validPort(ap)) apErr = "ARGO_PORT 须为 1–65535";
+            if (!okPort(ap)) apErr = "ARGO_PORT 须为 1–65535";
             else if (used[+ap]) apErr = "端口冲突：Argo 与 " + used[+ap].join("、") + " 都使用 " + ap;
           }
-          $("argoPort").classList.toggle("is-bad", !!apErr);
-          $("argoPortErr").textContent = apErr;
-          if (apErr) ok = false;
+          if (!mark("argoPort", apErr, "argoPortErr")) ok = false;
 
           // command
           var env = [["PROTOCOLS", sel.map(function (p) { return p.k; }).join(",")], ["PORT", base], ["UUID", u]];
-          sel.forEach(function (p) { if (p.env && p.inp.value.trim()) env.push([p.env, p.inp.value.trim()]); });
+          var add = function (k, v) { if (v) env.push([k, v]); };
+          sel.forEach(function (p) { if (p.env) add(p.env, p.inp.value.trim()); });
           var tok = "";
           if (argo) {
-            if (ap) env.push(["ARGO_PORT", ap]);
-            if (fixed) {
-              tok = val("argoToken");
-              if (tok) env.push(["ARGO_TOKEN", tok]);
-              env.push(["ARGO_DOMAIN", dom]);
-            }
+            add("ARGO_PORT", ap);
+            if (fixed) { tok = val("argoToken"); add("ARGO_TOKEN", tok); env.push(["ARGO_DOMAIN", dom]); }
             if (!$("sub").checked) env.push(["SUB", "0"]);
-            if (val("cfip")) env.push(["CFIP", val("cfip")]);
-            if (val("cfport")) env.push(["CFPORT", val("cfport")]);
+            add("CFIP", val("cfip"));
+            add("CFPORT", val("cfport"));
           }
-          if (val("name")) env.push(["NAME", val("name")]);
-          if ($("ipMode").value !== "auto") env.push(["IP_MODE", $("ipMode").value]);
-          if (has("reality") && val("sni")) env.push(["SNI", val("sni")]);
-          if (val("ver")) env.push(["SB_VERSION", val("ver")]);
+          add("WARP", warp);
+          if (warp === "ai") add("WARP_DOMAINS", $("warpDom").value.replace(/\s+/g, ""));
+          add("NAME", val("name"));
+          if ($("ipMode").value !== "auto") add("IP_MODE", $("ipMode").value);
+          if (has("reality")) add("SNI", val("sni"));
+          add("SB_VERSION", val("ver"));
+          if (!$("tune").checked) env.push(["TUNE", "0"]);
 
-          var cmd = $("cmd"), btn = document.querySelector('[data-copy="cmd"]');
-          if (ok) {
-            cmd.textContent = (tok ? " " : "") + env.map(function (e) { return e[0] + "=" + q(e[1]); }).join(" ") + " " + SCRIPT;
-            cmd.classList.remove("is-off");
-            btn.disabled = false;
-          } else {
-            cmd.textContent = "请先修正上方表单中的错误";
-            cmd.classList.add("is-off");
-            btn.disabled = true;
-          }
+          var cmd = $("cmd");
+          cmd.textContent = ok
+            ? (tok ? " " : "") + env.map(function (e) { return e[0] + "=" + q(e[1]); }).join(" ") + " " + SCRIPT
+            : "请先修正上方表单中的错误";
+          cmd.classList.toggle("is-off", !ok);
+          $("cmdBtn").disabled = !ok;
           $("tokWarn").hidden = !(ok && tok);
         }
 
@@ -422,18 +430,17 @@
           this.setAttribute("aria-pressed", show);
         };
 
-        // copy with fallbacks
+        // copy: execCommand first, then navigator.clipboard, else select for long-press
         function selectEl(el) {
           try { var r = document.createRange(); r.selectNodeContents(el); var s = window.getSelection(); s.removeAllRanges(); s.addRange(r); } catch (e) {}
         }
         function execCopy(text) {
-          var ta = document.createElement("textarea");
+          var ta = document.createElement("textarea"), ok = false;
           ta.value = text; ta.setAttribute("readonly", "");
           ta.style.cssText = "position:fixed;top:0;left:0;width:1px;height:1px;opacity:0;";
           document.body.appendChild(ta);
           ta.focus(); ta.select();
           try { ta.setSelectionRange(0, text.length); } catch (e) {}
-          var ok = false;
           try { ok = document.execCommand("copy"); } catch (e) {}
           document.body.removeChild(ta);
           return ok;
@@ -445,7 +452,8 @@
         }
         document.querySelectorAll("[data-copy]").forEach(function (btn) {
           btn.addEventListener("click", function () {
-            var el = $(btn.getAttribute("data-copy")), text = el.textContent;
+            var id = btn.getAttribute("data-copy");
+            var el = id ? $(id) : btn.parentNode.querySelector(".x-code"), text = el.textContent;
             function fail() { selectEl(el); flash(btn, "长按复制"); }
             if (execCopy(text)) { flash(btn, "已复制"); return; }
             try {
