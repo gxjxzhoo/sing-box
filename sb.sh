@@ -31,7 +31,7 @@
 set -o pipefail
 export LANG=en_US.UTF-8
 
-SCRIPT_VERSION="3.9.0"
+SCRIPT_VERSION="3.9.1"
 DIR=/etc/sing-box
 ENV_FILE=$DIR/sb.env
 CONF=$DIR/config.json
@@ -310,7 +310,7 @@ ensure_keys() {
 }
 
 # Argo 隧道协议（可多选）：协议 → WS 路径 / 内部端口偏移
-aproto_on() { [[ ",${ARGO_PROTO:-vless,vmess,trojan}," == *",$1,"* ]]; }
+aproto_on() { return 0; }  # Argo 的 vless/vmess/trojan 三个节点总是全部输出
 apath() { case "$1" in vless) echo /argo ;; vmess) echo /argo-vm ;; trojan) echo /argo-tr ;; esac; }
 aport() { case "$1" in vless) echo "$ARGO_IN_PORT" ;; vmess) echo $((ARGO_IN_PORT + 1)) ;; trojan) echo $((ARGO_IN_PORT + 2)) ;; esac; }
 
@@ -717,11 +717,6 @@ do_install() {
     ARGO_TOKEN=$(ask "Argo 固定隧道 Token（回车用临时隧道）" "")
     [ -n "$ARGO_TOKEN" ] && ARGO_DOMAIN=$(ask "固定隧道域名" "${ARGO_DOMAIN:-}")
   fi
-  if on argo && [ -t 0 ] && [ ! -f "$ENV_FILE" ]; then
-    local ap; ap=$(ask "Argo 本地端口（固定隧道在 CF 里填 HTTP → 127.0.0.1:此端口）" "$ARGO_PORT")
-    valid_port "$ap" && ARGO_PORT=$ap || warn "端口无效，沿用 $ARGO_PORT"
-    check_ports
-  fi
   if on argo && [ -n "${ARGO_TOKEN:-}" ] && [ -z "${ARGO_DOMAIN:-}" ]; then
     die "使用固定隧道 ARGO_TOKEN 时必须同时设置 ARGO_DOMAIN"
   fi
@@ -793,15 +788,22 @@ do_upgrade() { # 更新本脚本：下载 → 语法检查 → 替换，不改�
   bash -n "$t" || { rm -f "$t"; die "新脚本语法错误，已放弃"; }
   install -m 700 "$t" "$SELF"; rm -f "$t"
   info "脚本已更新：v$SCRIPT_VERSION → v$(sed -n 's/^SCRIPT_VERSION="\(.*\)"/\1/p' "$SELF")"
+  [ -f "$ENV_FILE" ] && { info "按新版本刷新配置并重启"; "$SELF" restart; "$SELF" nodes; }
 }
 
-do_restart() { need_root; detect_init; load_env; svc restart sing-box; on argo && svc restart sb-argo; do_status; }
+do_restart() { # 按当前脚本重新生成配置再重启（脚本升级后旧配置也会被刷新）
+  need_root; detect_init; detect_arch; ensure_deps; load_env
+  [ -f "$ENV_FILE" ] || die "未安装"
+  apply
+  on argo && svc restart sb-argo
+  do_status
+}
 
 do_status() {
   detect_init; load_env
   local s
-  for s in sing-box sb-argo; do
-    [ "$s" = sb-argo ] && ! on argo && continue
+  for s in sing-box sb-argo sb-nginx; do
+    [ "$s" != sing-box ] && ! on argo && continue
     if svc_active "$s"; then info "$s：运行中"; else err "$s：未运行"; fi
   done
 }
@@ -836,7 +838,7 @@ port_menu() {
 
 # 协议选择：字母 a-j（也接受数字 1-10），可连写 abce 或用空格/逗号分隔；输出逗号列表，回车输出空
 pick_protocols() {
-  local all=(${ALL_PROTOCOLS//,/ }) desc=("Argo 隧道（${ARGO_PROTO:-vless,vmess,trojan}）" "Hysteria2" "VLESS-Reality" "TUIC v5" "Trojan（TLS）" "VMess-WS" "Shadowsocks-2022" "AnyTLS" "ShadowTLS v3" "Socks5")
+  local all=(${ALL_PROTOCOLS//,/ }) desc=("Argo 隧道（vless/vmess/trojan）" "Hysteria2" "VLESS-Reality" "TUIC v5" "Trojan（TLS）" "VMess-WS" "Shadowsocks-2022" "AnyTLS" "ShadowTLS v3" "Socks5")
   local L=abcdefghij i n sel="" tok idx
   if [ -f "$ENV_FILE" ]; then echo "  ［✓］= 当前已安装" >&2; else echo "  ［✓］= 默认选中" >&2; fi
   for i in "${!all[@]}"; do
@@ -872,15 +874,14 @@ ip_menu() {
 argo_menu() {
   on argo || { warn "未启用 Argo，请先在「选择协议」里勾选"; return; }
   local t="临时隧道"; [ -n "${ARGO_TOKEN:-}" ] && t="固定隧道（$ARGO_DOMAIN）"
-  echo "  隧道：$t   协议：${ARGO_PROTO:-vless,vmess,trojan}   订阅：$(sub_on && echo 开启 || echo 关闭)"
-  printf '  %s\n' "1. 设置固定隧道" "2. 改回临时隧道" "3. 隧道协议（可多选）" "4. 订阅开/关" "5. 更换订阅令牌" "6. 修改本地端口（当前 $ARGO_PORT）" "0. 返回"
+  echo "  隧道：$t   订阅：$(sub_on && echo 开启 || echo 关闭)"
+  printf '  %s\n' "1. 设置固定隧道" "2. 改回临时隧道" "3. 订阅开/关" "4. 更换订阅令牌" "5. 修改本地端口（当前 $ARGO_PORT）" "0. 返回"
   case "$(ask "请选择" "")" in
     1) do_set "ARGO_TOKEN=$(ask "隧道 Token" "")" "ARGO_DOMAIN=$(ask "隧道域名" "${ARGO_DOMAIN:-}")" ;;
     2) do_set "ARGO_TOKEN=" "ARGO_DOMAIN=" ;;
-    3) local v; v=$(ask "Argo 协议（逗号分隔，可多选）" "${ARGO_PROTO:-vless,vmess,trojan}"); do_set "ARGO_PROTO=$v" ;;
-    4) if sub_on; then do_set SUB=0; else do_set SUB=1; fi ;;
-    5) do_set SUB_TOKEN= ;;
-    6) argo_port_set ;;
+    3) if sub_on; then do_set SUB=0; else do_set SUB=1; fi ;;
+    4) do_set SUB_TOKEN= ;;
+    5) argo_port_set ;;
   esac
 }
 
