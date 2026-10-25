@@ -31,7 +31,7 @@
 set -o pipefail
 export LANG=en_US.UTF-8
 
-SCRIPT_VERSION="3.8.0"
+SCRIPT_VERSION="3.8.1"
 DIR=/etc/sing-box
 ENV_FILE=$DIR/sb.env
 CONF=$DIR/config.json
@@ -312,7 +312,7 @@ build_config() {
 
   on hy2 && inb=$(jq --argjson p "$hy2" --arg u "$UUID" --argjson t "$tls" '. + [{
         type:"hysteria2", tag:"hy2", listen:"::", listen_port:$p,
-        users:[{password:$u}], masquerade:"https://www.bing.com",
+        users:[{password:$u}], masquerade:"https://bing.com",
         tls:($t + {alpn:["h3"]})}]' <<<"$inb")
 
   on tuic && inb=$(jq --argjson p "$tuic" --arg u "$UUID" --argjson t "$tls" '. + [{
@@ -524,13 +524,13 @@ show_nodes() {
   {
    while read -r ip sfx; do
     n="$nn$sfx"
-    on hy2     && echo "hysteria2://$UUID@$ip:$(pt hy2)?sni=www.bing.com&alpn=h3&insecure=1${fp:+&pinSHA256=$fp}#$n-hy2"
+    on hy2     && echo "hysteria2://$UUID@$ip:$(pt hy2)/?sni=bing.com&insecure=1&alpn=h3${fp:+&pinSHA256=$fp}#$n-hy2"
     on reality && echo "vless://$UUID@$ip:$(pt reality)?encryption=none&flow=xtls-rprx-vision&security=reality&sni=$SNI&fp=chrome&pbk=$REALITY_PUBLIC&sid=$REALITY_SID&type=tcp#$n-reality"
-    on tuic    && echo "tuic://$UUID:$UUID@$ip:$(pt tuic)?sni=www.bing.com&alpn=h3&congestion_control=bbr&udp_relay_mode=native&allow_insecure=1#$n-tuic"
-    on trojan  && echo "trojan://$UUID@$ip:$(pt trojan)?security=tls&sni=www.bing.com&allowInsecure=1&type=tcp#$n-trojan"
+    on tuic    && echo "tuic://$UUID:$UUID@$ip:$(pt tuic)?sni=bing.com&alpn=h3&congestion_control=bbr&udp_relay_mode=native&allow_insecure=1#$n-tuic"
+    on trojan  && echo "trojan://$UUID@$ip:$(pt trojan)?security=tls&sni=bing.com&allowInsecure=1&type=tcp#$n-trojan"
     on vmess   && echo "vmess://$(vmess_b64 "${NAME}$sfx-vmess" "${ip//[\[\]]/}" "$(pt vmess)" "" "/vmess?ed=2560" "")"
     on ss      && echo "ss://$(b64 "2022-blake3-aes-128-gcm:$SS_PASSWORD")@$ip:$(pt ss)#$n-ss"
-    on anytls  && echo "anytls://$UUID@$ip:$(pt anytls)?sni=www.bing.com&insecure=1#$n-anytls"
+    on anytls  && echo "anytls://$UUID@$ip:$(pt anytls)?sni=bing.com&insecure=1#$n-anytls"
     on shadowtls && echo "ss://$(b64 "2022-blake3-aes-128-gcm:$SS_PASSWORD")@$ip:$(pt shadowtls)?shadow-tls=$(b64 "{\"version\":\"3\",\"host\":\"www.bing.com\",\"password\":\"$UUID\"}")#$n-shadowtls"
     on socks   && echo "socks5://${UUID%%-*}:$UUID@$ip:$(pt socks)#$n-socks5"
    done <<<"$ips"
