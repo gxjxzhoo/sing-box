@@ -26,12 +26,14 @@
 #   IP_MODE     节点用哪个 IP：auto（优先 v4）/4/6/both，默认 auto
 #   SB_VERSION  固定 sing-box 版本（需 ≥1.12，如 1.12.9），默认最新正式版
 #   CERT_B64/KEY_B64  自定义证书和私钥（base64 编码的 PEM，需配对）；不填用内置固定证书（CN=bing.com）
+#   WARP        出站走 Cloudflare WARP：0 关闭（默认）/ai 只让 AI 与流媒体走 WARP/all 全部走 WARP
+#   WARP_DOMAINS  ai 模式额外走 WARP 的域名后缀，逗号分隔（如 example.com,foo.org）
 #   TUNE        1 开启 BBR+fq 与 UDP 缓冲调优（默认）/0 不改内核参数
 # Alpine 需先 apk add bash curl
 set -o pipefail
 export LANG=en_US.UTF-8
 
-SCRIPT_VERSION="3.9.4"
+SCRIPT_VERSION="3.10.0"
 DIR=/etc/sing-box
 ENV_FILE=$DIR/sb.env
 CONF=$DIR/config.json
@@ -157,7 +159,8 @@ save_env() {
   {
     echo "PORT_LAYOUT=2"
     for k in UUID PORT $PORT_KEYS PROTOCOLS IP_MODE SNI ARGO_PORT ARGO_TOKEN ARGO_DOMAIN CFIP CFPORT NAME TUNE CERT_CUSTOM \
-             REALITY_PRIVATE REALITY_PUBLIC REALITY_SID SS_PASSWORD STLS_INNER_PORT ARGO_IN_PORT SUB SUB_TOKEN SUB_PORT SB_VERSION; do
+             REALITY_PRIVATE REALITY_PUBLIC REALITY_SID SS_PASSWORD STLS_INNER_PORT ARGO_IN_PORT SUB SUB_TOKEN SUB_PORT SB_VERSION \
+             WARP WARP_DOMAINS WARP_PRIV WARP_V4 WARP_V6 WARP_PEER WARP_RES WARP_EP; do
       printf '%s=%q\n' "$k" "${!k:-}"
     done
   } > "$ENV_FILE"
@@ -314,6 +317,51 @@ apath() { case "$1" in vless) echo /argo ;; vmess) echo /argo-vm ;; trojan) echo
 aport() { case "$1" in vless) echo "$ARGO_IN_PORT" ;; vmess) echo $((ARGO_IN_PORT + 1)) ;; trojan) echo $((ARGO_IN_PORT + 2)) ;; esac; }
 
 # ---------- 生成配置 ----------
+# ---------- WARP 出站 ----------
+# ai 模式默认走 WARP 的域名后缀（解锁 ChatGPT/Claude/Gemini 与常见流媒体）
+WARP_AI="openai.com,chatgpt.com,oaistatic.com,oaiusercontent.com,sora.com,anthropic.com,claude.ai,claude.com,gemini.google.com,aistudio.google.com,generativelanguage.googleapis.com,ai.google.dev,notebooklm.google,perplexity.ai,grok.com,x.ai,netflix.com,netflix.net,nflxvideo.net,nflxext.com,nflximg.net,nflxso.net,disneyplus.com,disney-plus.net,dssott.com,bamgrid.com,hulu.com,hbomax.com,max.com,primevideo.com,aiv-cdn.net"
+warp_on() { [ -n "${WARP:-}" ] && [ "$WARP" != 0 ]; }
+
+warp_reg() { # 免费注册一个 WARP 账号（WireGuard），结果存进 sb.env
+  local kp pub r cid
+  kp=$("$BIN_SB" generate wg-keypair) || die "生成 WireGuard 密钥失败"
+  WARP_PRIV=$(awk '/PrivateKey/{print $2}' <<<"$kp"); pub=$(awk '/PublicKey/{print $2}' <<<"$kp")
+  r=$(curl -fsS -m 20 -X POST https://api.cloudflareclient.com/v0a2158/reg \
+      -H 'Content-Type: application/json' -H 'CF-Client-Version: a-6.11-2223' -H 'User-Agent: okhttp/3.12.1' \
+      -d "{\"key\":\"$pub\",\"install_id\":\"\",\"fcm_token\":\"\",\"tos\":\"$(date -u +%FT%T.000Z)\",\"type\":\"Android\",\"locale\":\"en_US\"}") \
+    || die "WARP 注册失败（本机连不上 api.cloudflareclient.com）"
+  WARP_V4=$(jq -r '.config.interface.addresses.v4 // empty' <<<"$r")
+  WARP_V6=$(jq -r '.config.interface.addresses.v6 // empty' <<<"$r")
+  WARP_PEER=$(jq -r '.config.peers[0].public_key // empty' <<<"$r")
+  cid=$(jq -r '.config.client_id // empty' <<<"$r")
+  [ -n "$WARP_V4" ] && [ -n "$WARP_PEER" ] || die "WARP 注册返回异常"
+  WARP_RES=$(printf '%s' "$cid" | base64 -d 2>/dev/null | od -An -tu1 | tr -s ' \n' ',' | sed 's/^,//; s/,$//')
+  # 纯 IPv6 机器用 v6 接入点
+  if [ -z "${WARP_EP:-}" ]; then
+    if curl -4 -s -m 5 -o /dev/null https://1.1.1.1 2>/dev/null; then WARP_EP=162.159.192.1; else WARP_EP=2606:4700:d0::a29f:c001; fi
+  fi
+  info "WARP 账号已注册"
+}
+
+warp_endpoint() { # 输出 sing-box endpoints 数组
+  warp_on || { echo '[]'; return; }
+  jq -n --arg k "$WARP_PRIV" --arg v4 "$WARP_V4" --arg v6 "${WARP_V6:-}" --arg peer "$WARP_PEER" \
+        --arg ep "$WARP_EP" --arg res "${WARP_RES:-}" '[{
+    type:"wireguard", tag:"warp", system:false, mtu:1280,
+    address:([$v4+"/32"] + (if $v6 == "" then [] else [$v6+"/128"] end)),
+    private_key:$k,
+    peers:[{address:$ep, port:2408, public_key:$peer, allowed_ips:["0.0.0.0/0","::/0"],
+            reserved:(if $res == "" then [0,0,0] else ($res|split(",")|map(tonumber)) end)}]}]'
+}
+
+warp_route() { # 输出 route 对象
+  local d="$WARP_AI${WARP_DOMAINS:+,$WARP_DOMAINS}"
+  jq -n --arg m "${WARP:-0}" --arg d "${d// /}" '
+    {final:(if $m == "all" then "warp" else "direct" end), default_domain_resolver:"local"}
+    + (if $m == "ai" then {rules:[{action:"sniff"},
+         {domain_suffix:($d|split(",")|map(select(. != ""))), outbound:"warp"}]} else {} end)'
+}
+
 build_config() {
   local hy2 tuic anytls socks tls inb='[]'
   hy2=$(pt hy2); tuic=$(pt tuic); anytls=$(pt anytls); socks=$(pt socks)
@@ -386,12 +434,13 @@ build_config() {
       '{clash_api:{external_controller:$c, external_ui:$u, secret:$s}}')
   fi
 
-  jq -n --argjson inb "$inb" --argjson exp "$exp" '{
+  jq -n --argjson inb "$inb" --argjson exp "$exp" --argjson ep "$(warp_endpoint)" --argjson rt "$(warp_route)" '{
     log:{level:"warn", timestamp:true},
     dns:{servers:[{type:"local", tag:"local"}]},
     inbounds:$inb,
     outbounds:[{type:"direct", tag:"direct"}],
-    route:{final:"direct", default_domain_resolver:"local"}}
+    route:$rt}
+    + (if $ep == [] then {} else {endpoints:$ep} end)
     + (if $exp == {} then {} else {experimental:$exp} end)' > "$CONF.new"
   chmod 600 "$CONF.new"
   "$BIN_SB" check -c "$CONF.new" || { rm -f "$CONF.new"; die "配置校验失败，未改动现有配置"; }
@@ -655,7 +704,9 @@ tune_sysctl() { # BBR+fq（TCP 协议提速）与更大的 UDP 缓冲（Hy2/TUIC
 apply() { # 生成配置并（重）启动
   save_env
   trim_logs; tune_sysctl
-  ensure_keys; save_env
+  ensure_keys
+  warp_on && [ -z "${WARP_PRIV:-}" ] && warp_reg
+  save_env
   build_config
   write_service sing-box "sing-box" "$BIN_SB run -c $CONF"
   svc restart sing-box
@@ -670,7 +721,7 @@ do_install() {
   if [ -f "$ENV_FILE" ]; then
     warn "检测到已安装，将保留现有设置重新安装（命令行传入的变量优先）"
     local k ov=()
-    for k in UUID PORT $PORT_KEYS PROTOCOLS IP_MODE SUB SNI ARGO_PORT ARGO_TOKEN ARGO_DOMAIN CFIP CFPORT NAME SB_VERSION TUNE CERT_B64 KEY_B64; do
+    for k in UUID PORT $PORT_KEYS PROTOCOLS IP_MODE SUB SNI ARGO_PORT ARGO_TOKEN ARGO_DOMAIN CFIP CFPORT NAME SB_VERSION TUNE CERT_B64 KEY_B64 WARP WARP_DOMAINS; do
       [ -n "${!k+x}" ] && ov+=("$k=${!k}")
     done
     load_env
@@ -748,6 +799,8 @@ do_set() { # KEY=VAL ...
     case "$k" in
       PROTOCOLS) for p in ${v//,/ }; do [[ ",$ALL_PROTOCOLS," == *",$p,"* ]] || die "未知协议：$p"; done; PROTOCOLS=$v ;;
       SUB) case "$v" in 0|1) SUB=$v ;; *) die "SUB 只能是 0 或 1" ;; esac ;;
+      WARP) case "$v" in 0|ai|all) WARP=$v ;; renew) WARP_PRIV=""; WARP_EP="" ;; *) die "WARP 只能是 0/ai/all（renew=重新注册）" ;; esac ;;
+      WARP_DOMAINS) WARP_DOMAINS=${v// /} ;;
       CERT_B64|KEY_B64) printf -v "$k" '%s' "$v" ;;
       CERT) [ "$v" = fixed ] || die "CERT 只能设为 fixed（改回固定证书）"; CERT_CUSTOM=0 ;;
       TUNE) case "$v" in 0|1) TUNE=$v; rm -f "$SYSCTL_FILE" ;; *) die "TUNE 只能是 0 或 1" ;; esac ;;
@@ -898,6 +951,32 @@ argo_port_set() {
   [ -n "${ARGO_TOKEN:-}" ] && warn "记得把 Cloudflare 里 $ARGO_DOMAIN 的服务改为 HTTP → 127.0.0.1:$p" || true
 }
 
+warp_name() { case "${WARP:-0}" in ai) echo "AI/流媒体走 WARP" ;; all) echo "全部走 WARP" ;; *) echo 关闭 ;; esac; }
+
+warp_menu() {
+  echo "  当前：$(warp_name)"
+  printf '  %s\n' "1. 关闭" "2. 仅 AI/流媒体走 WARP（ChatGPT、Claude、Gemini、Netflix、Disney+ 等）" "3. 全部流量走 WARP" "4. 添加自定义分流域名（当前：${WARP_DOMAINS:-无}）" "5. 重新注册 WARP 账号" "6. 测试 WARP 出口" "0. 返回"
+  case "$(ask "请选择" "")" in
+    1) do_set WARP=0 ;; 2) do_set WARP=ai ;; 3) do_set WARP=all ;;
+    4) do_set "WARP_DOMAINS=$(ask "域名后缀，逗号分隔（留空=清除）" "${WARP_DOMAINS:-}")" ;;
+    5) warp_on || { warn "请先开启 WARP"; return; }; do_set WARP=renew ;;
+    6) warp_test ;;
+  esac
+}
+
+warp_test() { # 临时起一个只听本机的 socks 入站，经 WARP 访问 Cloudflare trace
+  warp_on || { warn "WARP 未开启"; return; }
+  local p t; p=$(rand_port); t=$(mktemp)
+  jq --argjson p "$p" '.inbounds=[{type:"socks", tag:"t", listen:"127.0.0.1", listen_port:$p}] | del(.experimental)
+      | .route={final:"warp", default_domain_resolver:"local"}' "$CONF" > "$t"
+  "$BIN_SB" run -c "$t" >/dev/null 2>&1 & local pid=$!
+  sleep 2
+  local r; r=$(curl -s -m 10 --socks5-hostname "127.0.0.1:$p" https://www.cloudflare.com/cdn-cgi/trace)
+  kill "$pid" 2>/dev/null; rm -f "$t"
+  if grep -q '^warp=on' <<<"$r"; then info "WARP 出口正常：$(sed -n 's/^ip=//p' <<<"$r")（$(sed -n 's/^loc=//p' <<<"$r")）"
+  else err "WARP 不通，可尝试 5. 重新注册，或 sb set WARP=0 关闭"; fi
+}
+
 update_menu() {
   echo "  内核：$("$BIN_SB" version 2>/dev/null | head -1 | awk '{print $3}')   脚本：v$SCRIPT_VERSION"
   printf '  %s\n' "1. 更新 sing-box/cloudflared 内核" "2. 更新本脚本" "0. 返回"
@@ -913,6 +992,7 @@ menu_status() {
   fi
   if [ "$s" = 运行中 ]; then info "sing-box：$s$a"; else err "sing-box：$s$a"; fi
   echo "协议：${PROTOCOLS//,/ }"
+  warp_on && echo "WARP：$(warp_name)"
 }
 
 menu() {
@@ -938,11 +1018,12 @@ menu() {
  4. 修改 UUID
  5. 节点 IP（v4/v6）
  6. Argo 隧道 / 订阅
+ 7. WARP 出站
  ─── 维护 ───
- 7. 重启
- 8. 更新
- 9. 重装（保留设置）
-10. 卸载
+ 8. 重启
+ 9. 更新
+10. 重装（保留设置）
+11. 卸载
  0. 退出
 EOF
     x=$(ask "请选择" "")
@@ -954,10 +1035,11 @@ EOF
       4) x=$(ask "新 UUID（回车随机生成）" ""); do_set "UUID=${x:-$(cat /proc/sys/kernel/random/uuid)}" ;;
       5) ip_menu ;;
       6) argo_menu ;;
-      7) do_restart ;;
-      8) update_menu ;;
-      9) do_install ;;
-      10) [ "$(ask "确认卸载？输入 y" "")" = y ] && do_uninstall ;;
+      7) warp_menu ;;
+      8) do_restart ;;
+      9) update_menu ;;
+      10) do_install ;;
+      11) [ "$(ask "确认卸载？输入 y" "")" = y ] && do_uninstall ;;
       *) warn "无效选项" ;;
     esac )  # 子 shell：某项出错只返回菜单，不退出
   done
