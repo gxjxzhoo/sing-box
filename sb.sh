@@ -14,7 +14,7 @@
 #   PORT        直连起始端口（Hy2=PORT，Reality=+1，TUIC=+2，Trojan=+3，VMess=+4，SS=+5，AnyTLS=+6，ShadowTLS=+7，Socks5=+8；默认随机）
 #   HY2_PORT/REALITY_PORT/TUIC_PORT/TROJAN_PORT/VMESS_PORT/SS_PORT/ANYTLS_PORT/SHADOWTLS_PORT/SOCKS_PORT  单独指定某协议端口（留空=按 PORT 推算）
 #   PROTOCOLS   要启用的协议，逗号分隔，默认 argo,hy2,reality；可加 tuic,trojan,vmess,ss,anytls,shadowtls,socks
-#   ARGO_PROTO  Argo 隧道里跑的协议：vless（默认）/vmess/trojan
+#   ARGO_PROTO  Argo 隧道协议，可多选：默认 vless,vmess,trojan（Nginx 只听 127.0.0.1:ARGO_PORT 按路径分流，订阅同端口）
 #   UUID        默认随机
 #   SNI         Reality 偷取的站点，默认 www.iij.ad.jp
 #   ARGO_PORT   Argo 本地端口（只监听 127.0.0.1），默认 8001（被占用则随机）
@@ -31,7 +31,7 @@
 set -o pipefail
 export LANG=en_US.UTF-8
 
-SCRIPT_VERSION="3.8.3"
+SCRIPT_VERSION="3.9.0"
 DIR=/etc/sing-box
 ENV_FILE=$DIR/sb.env
 CONF=$DIR/config.json
@@ -157,7 +157,7 @@ save_env() {
   {
     echo "PORT_LAYOUT=2"
     for k in UUID PORT $PORT_KEYS PROTOCOLS IP_MODE SNI ARGO_PORT ARGO_TOKEN ARGO_DOMAIN CFIP CFPORT NAME TUNE CERT_CUSTOM \
-             REALITY_PRIVATE REALITY_PUBLIC REALITY_SID SS_PASSWORD STLS_INNER_PORT ARGO_PROTO SUB SUB_TOKEN SUB_PORT SB_VERSION; do
+             REALITY_PRIVATE REALITY_PUBLIC REALITY_SID SS_PASSWORD STLS_INNER_PORT ARGO_PROTO ARGO_IN_PORT SUB SUB_TOKEN SUB_PORT SB_VERSION; do
       printf '%s=%q\n' "$k" "${!k:-}"
     done
   } > "$ENV_FILE"
@@ -184,7 +184,7 @@ pt() {
 }
 
 check_ports() { # 已启用协议的端口必须合法且互不冲突
-  local seen=" $ARGO_PORT ${STLS_INNER_PORT:-} ${SUB_PORT:-} " x p
+  local seen=" $ARGO_PORT ${STLS_INNER_PORT:-} ${SUB_PORT:-} ${ARGO_IN_PORT:-} ${ARGO_IN_PORT:+$((ARGO_IN_PORT + 1)) $((ARGO_IN_PORT + 2))} " x p
   for x in $DIRECT; do
     on "$x" || continue
     p=$(pt "$x")
@@ -306,7 +306,13 @@ ensure_keys() {
   [ -n "${STLS_INNER_PORT:-}" ] || STLS_INNER_PORT=$(rand_port)
   [ -n "${SUB_TOKEN:-}" ] || SUB_TOKEN=$(openssl rand -hex 12)
   [ -n "${SUB_PORT:-}" ] || SUB_PORT=$(rand_port)
+  [ -n "${ARGO_IN_PORT:-}" ] || ARGO_IN_PORT=$(rand_port)
 }
+
+# Argo 隧道协议（可多选）：协议 → WS 路径 / 内部端口偏移
+aproto_on() { [[ ",${ARGO_PROTO:-vless,vmess,trojan}," == *",$1,"* ]]; }
+apath() { case "$1" in vless) echo /argo ;; vmess) echo /argo-vm ;; trojan) echo /argo-tr ;; esac; }
+aport() { case "$1" in vless) echo "$ARGO_IN_PORT" ;; vmess) echo $((ARGO_IN_PORT + 1)) ;; trojan) echo $((ARGO_IN_PORT + 2)) ;; esac; }
 
 # ---------- 生成配置 ----------
 build_config() {
@@ -363,16 +369,15 @@ build_config() {
        {type:"shadowsocks", tag:"stls-ss", listen:"127.0.0.1", listen_port:$ip,
         method:"2022-blake3-aes-128-gcm", password:$pw}]' <<<"$inb")
 
-  if on argo; then
-    local au
-    case "${ARGO_PROTO:-vless}" in
-      vmess)  au='[{uuid:$u, alterId:0}]' ;;
-      trojan) au='[{password:$u}]' ;;
-      *)      au='[{uuid:$u}]' ;;
-    esac
-    inb=$(jq --argjson p "$ARGO_PORT" --arg u "$UUID" --arg ty "${ARGO_PROTO:-vless}" ". + [{
-        type:\$ty, tag:\"argo\", listen:\"127.0.0.1\", listen_port:\$p, users:$au,
-        transport:{type:\"ws\", path:\"/argo\", early_data_header_name:\"Sec-WebSocket-Protocol\"}}]" <<<"$inb")
+  if on argo; then  # 各 Argo 协议只听 127.0.0.1 内部端口，由 Nginx（127.0.0.1:ARGO_PORT）按路径分流
+    local ap au
+    for ap in vless vmess trojan; do
+      aproto_on "$ap" || continue
+      case "$ap" in vmess) au='[{uuid:$u, alterId:0}]' ;; trojan) au='[{password:$u}]' ;; *) au='[{uuid:$u}]' ;; esac
+      inb=$(jq --argjson p "$(aport "$ap")" --arg u "$UUID" --arg ty "$ap" --arg pa "$(apath "$ap")" ". + [{
+          type:\$ty, tag:(\"argo-\"+\$ty), listen:\"127.0.0.1\", listen_port:\$p, users:$au,
+          transport:{type:\"ws\", path:\$pa, early_data_header_name:\"Sec-WebSocket-Protocol\"}}]" <<<"$inb")
+    done
   fi
 
   # Argo 订阅：借用 sing-box 自带的静态文件服务（clash_api external_ui），只监听 127.0.0.1，经隧道按路径转发
@@ -461,10 +466,51 @@ remove_service() {
   fi
 }
 
+# 独立的 Nginx 实例（不碰系统 nginx）：只听 127.0.0.1:ARGO_PORT，按路径分流到各 Argo 协议和订阅
+setup_nginx() {
+  has nginx || { info "安装 Nginx"; pkg_install nginx || die "Nginx 安装失败"; }
+  mkdir -p "$DIR/nginx"
+  local ap loc=""
+  for ap in vless vmess trojan; do
+    aproto_on "$ap" || continue
+    loc+="    location = $(apath "$ap") { proxy_pass http://127.0.0.1:$(aport "$ap"); proxy_http_version 1.1; proxy_set_header Upgrade \$http_upgrade; proxy_set_header Connection \"upgrade\"; proxy_set_header Host \$host; proxy_read_timeout 1d; proxy_send_timeout 1d; proxy_buffering off; }
+"
+  done
+  sub_on && loc+="    location ^~ /ui/$SUB_TOKEN/ { proxy_pass http://127.0.0.1:$SUB_PORT; }
+"
+  ( umask 077; cat > "$DIR/nginx.conf.new" <<EOF
+user root;
+worker_processes 1;
+daemon off;
+pid $DIR/nginx/nginx.pid;
+error_log $DIR/nginx/error.log warn;
+events { worker_connections 4096; }
+http {
+  access_log off;
+  server_tokens off;
+  client_body_temp_path $DIR/nginx/body;
+  proxy_temp_path $DIR/nginx/proxy;
+  fastcgi_temp_path $DIR/nginx/fcgi;
+  uwsgi_temp_path $DIR/nginx/uwsgi;
+  scgi_temp_path $DIR/nginx/scgi;
+  server {
+    listen 127.0.0.1:$ARGO_PORT;
+$loc    location / { return 404; }
+  }
+}
+EOF
+  )
+  nginx -t -c "$DIR/nginx.conf.new" >/dev/null 2>&1 || { nginx -t -c "$DIR/nginx.conf.new"; rm -f "$DIR/nginx.conf.new"; die "Nginx 配置校验失败"; }
+  mv -f "$DIR/nginx.conf.new" "$DIR/nginx.conf"
+  write_service sb-nginx "Nginx for sing-box Argo" "$(command -v nginx) -c $DIR/nginx.conf"
+  svc restart sb-nginx
+}
+
 svc_sig() { cat "/etc/systemd/system/$1.service" "/etc/init.d/$1" "$DIR/argo.env" "$DIR/argo.yml" 2>/dev/null | cksum; }
 
 setup_argo_service() {
-  if ! on argo; then remove_service sb-argo 2>/dev/null; rm -f "$DIR/argo.env" "$DIR/argo.yml"; return; fi
+  if ! on argo; then remove_service sb-argo 2>/dev/null; remove_service sb-nginx 2>/dev/null; rm -f "$DIR/argo.env" "$DIR/argo.yml" "$DIR/nginx.conf"; return; fi
+  setup_nginx
   local before; before=$(svc_sig sb-argo)
   [ -x "$BIN_CF" ] || install_cloudflared
   local cmd="$BIN_CF tunnel --no-autoupdate --edge-ip-version auto --protocol http2"
@@ -474,11 +520,7 @@ setup_argo_service() {
     write_service sb-argo "Cloudflare Tunnel (sing-box)" "$cmd run" "$DIR/argo.env"
   else
     rm -f "$DIR/argo.env"
-    if sub_on; then  # 临时隧道：本地 ingress 按路径分流，订阅路径 → 订阅服务，其余 → Argo 节点
-      ( umask 077; printf 'ingress:\n  - path: ^/ui/%s/\n    service: http://127.0.0.1:%s\n  - service: http://127.0.0.1:%s\n' \
-        "$SUB_TOKEN" "$SUB_PORT" "$ARGO_PORT" > "$DIR/argo.yml" )
-      cmd="$cmd --config $DIR/argo.yml"
-    else rm -f "$DIR/argo.yml"; fi
+    rm -f "$DIR/argo.yml"
     # 临时隧道每次启动（含开机）域名都会变：启动后自动刷新节点和订阅内容
     write_service sb-argo "Cloudflare Tunnel (sing-box)" "$cmd --url http://127.0.0.1:$ARGO_PORT" "" "sleep 5; $SELF nodes"
   fi
@@ -562,11 +604,9 @@ show_nodes() {
     if on argo; then
       host=$(argo_domain)
       if [ -n "$host" ]; then
-        case "${ARGO_PROTO:-vless}" in
-          vmess)  echo "vmess://$(vmess_b64 "${NAME}-argo" "$CFIP" "$CFPORT" "$host" "/argo?ed=2560" tls)" ;;
-          trojan) echo "trojan://$UUID@$CFIP:$CFPORT?security=tls&sni=$host&fp=chrome&type=ws&host=$host&path=%2Fargo%3Fed%3D2560#$n-argo" ;;
-          *)      echo "vless://$UUID@$CFIP:$CFPORT?encryption=none&security=tls&sni=$host&fp=chrome&type=ws&host=$host&path=%2Fargo%3Fed%3D2560#$n-argo" ;;
-        esac
+        aproto_on vless  && echo "vless://$UUID@$CFIP:$CFPORT?encryption=none&security=tls&sni=$host&fp=chrome&type=ws&host=$host&path=%2Fargo%3Fed%3D2560#$n-argo-vless"
+        aproto_on vmess  && echo "vmess://$(vmess_b64 "${NAME}-argo-vmess" "$CFIP" "$CFPORT" "$host" "/argo-vm?ed=2560" tls)"
+        aproto_on trojan && echo "trojan://$UUID@$CFIP:$CFPORT?security=tls&sni=$host&fp=chrome&type=ws&host=$host&path=%2Fargo-tr%3Fed%3D2560#$n-argo-trojan"
       else
         warn "未获取到 Argo 域名，稍后执行 sb nodes 再试" >&2
       fi
@@ -589,7 +629,6 @@ show_nodes() {
   if sub_on && [ -n "${host:-}" ]; then
     info "订阅链接（Base64，只经 Argo 域名访问；明文把 sub 换成 raw）："
     echo "https://$host/ui/$SUB_TOKEN/sub"
-    [ -n "${ARGO_TOKEN:-}" ] && warn "固定隧道需在 Cloudflare 同域名再加一条路由：路径 ^/ui/$SUB_TOKEN/ → http://127.0.0.1:$SUB_PORT，并排在无路径那条之前"
     [ -z "${ARGO_TOKEN:-}" ] && warn "临时隧道重启后域名会变，订阅链接随之变化；执行 sb nodes 查看新链接"
   fi
   return 0
@@ -673,13 +712,7 @@ do_install() {
   # Argo 本地端口默认 8001（与旧版 sb 一致，CF 后台填过的路由不用改；只听 127.0.0.1），被占用才随机
   if [ -z "${ARGO_PORT:-}" ]; then if port_free 8001; then ARGO_PORT=8001; else ARGO_PORT=$(rand_port); fi; fi
   check_ports
-  if on argo && [ -z "${ARGO_PROTO:-}" ] && [ -t 0 ] && [ ! -f "$ENV_FILE" ]; then
-    echo "Argo 隧道协议：" >&2; printf '  %s\n' "1. vless（默认）" "2. vmess" "3. trojan" >&2
-    case "$(ask "请选择（回车 vless）" "")" in
-      2) ARGO_PROTO=vmess ;; 3) ARGO_PROTO=trojan ;; *) ARGO_PROTO=vless ;;
-    esac
-  fi
-  ARGO_PROTO=${ARGO_PROTO:-vless}
+  ARGO_PROTO=${ARGO_PROTO:-vless,vmess,trojan}
   if on argo && [ -z "${ARGO_TOKEN:-}" ] && [ -t 0 ] && [ ! -f "$ENV_FILE" ]; then
     ARGO_TOKEN=$(ask "Argo 固定隧道 Token（回车用临时隧道）" "")
     [ -n "$ARGO_TOKEN" ] && ARGO_DOMAIN=$(ask "固定隧道域名" "${ARGO_DOMAIN:-}")
@@ -721,7 +754,7 @@ do_set() { # KEY=VAL ...
     case "$k" in IP_MODE|NAME|CFIP|CFPORT) ;; *) only_view=0 ;; esac
     case "$k" in
       PROTOCOLS) for p in ${v//,/ }; do [[ ",$ALL_PROTOCOLS," == *",$p,"* ]] || die "未知协议：$p"; done; PROTOCOLS=$v ;;
-      ARGO_PROTO) case "$v" in vless|vmess|trojan) ARGO_PROTO=$v ;; *) die "ARGO_PROTO 只能是 vless/vmess/trojan" ;; esac ;;
+      ARGO_PROTO) v=${v// /}; [[ "$v" =~ ^(vless|vmess|trojan)(,(vless|vmess|trojan))*$ ]] || die "ARGO_PROTO 只能是 vless/vmess/trojan 的组合（逗号分隔）"; ARGO_PROTO=$v ;;
       SUB) case "$v" in 0|1) SUB=$v ;; *) die "SUB 只能是 0 或 1" ;; esac ;;
       CERT_B64|KEY_B64) printf -v "$k" '%s' "$v" ;;
       CERT) [ "$v" = fixed ] || die "CERT 只能设为 fixed（改回固定证书）"; CERT_CUSTOM=0 ;;
@@ -775,7 +808,7 @@ do_status() {
 
 do_uninstall() {
   need_root; detect_init
-  remove_service sb-argo; remove_service sing-box
+  remove_service sb-argo; remove_service sb-nginx; remove_service sing-box
   [ "$(readlink /usr/bin/sb 2>/dev/null)" = "$SELF" ] && rm -f /usr/bin/sb
   rm -f "$SYSCTL_FILE"
   rm -rf "$DIR" "$SELF"
@@ -803,7 +836,7 @@ port_menu() {
 
 # 协议选择：字母 a-j（也接受数字 1-10），可连写 abce 或用空格/逗号分隔；输出逗号列表，回车输出空
 pick_protocols() {
-  local all=(${ALL_PROTOCOLS//,/ }) desc=("Argo 隧道（${ARGO_PROTO:-vless}-WS）" "Hysteria2" "VLESS-Reality" "TUIC v5" "Trojan（TLS）" "VMess-WS" "Shadowsocks-2022" "AnyTLS" "ShadowTLS v3" "Socks5")
+  local all=(${ALL_PROTOCOLS//,/ }) desc=("Argo 隧道（${ARGO_PROTO:-vless,vmess,trojan}）" "Hysteria2" "VLESS-Reality" "TUIC v5" "Trojan（TLS）" "VMess-WS" "Shadowsocks-2022" "AnyTLS" "ShadowTLS v3" "Socks5")
   local L=abcdefghij i n sel="" tok idx
   if [ -f "$ENV_FILE" ]; then echo "  ［✓］= 当前已安装" >&2; else echo "  ［✓］= 默认选中" >&2; fi
   for i in "${!all[@]}"; do
@@ -839,15 +872,12 @@ ip_menu() {
 argo_menu() {
   on argo || { warn "未启用 Argo，请先在「选择协议」里勾选"; return; }
   local t="临时隧道"; [ -n "${ARGO_TOKEN:-}" ] && t="固定隧道（$ARGO_DOMAIN）"
-  echo "  隧道：$t   协议：${ARGO_PROTO:-vless}   订阅：$(sub_on && echo 开启 || echo 关闭)"
-  printf '  %s\n' "1. 设置固定隧道" "2. 改回临时隧道" "3. 切换隧道协议" "4. 订阅开/关" "5. 更换订阅令牌" "6. 修改本地端口（当前 $ARGO_PORT）" "0. 返回"
+  echo "  隧道：$t   协议：${ARGO_PROTO:-vless,vmess,trojan}   订阅：$(sub_on && echo 开启 || echo 关闭)"
+  printf '  %s\n' "1. 设置固定隧道" "2. 改回临时隧道" "3. 隧道协议（可多选）" "4. 订阅开/关" "5. 更换订阅令牌" "6. 修改本地端口（当前 $ARGO_PORT）" "0. 返回"
   case "$(ask "请选择" "")" in
     1) do_set "ARGO_TOKEN=$(ask "隧道 Token" "")" "ARGO_DOMAIN=$(ask "隧道域名" "${ARGO_DOMAIN:-}")" ;;
     2) do_set "ARGO_TOKEN=" "ARGO_DOMAIN=" ;;
-    3) printf '  %s\n' "1. vless" "2. vmess" "3. trojan"
-       case "$(ask "请选择" "")" in
-         1) do_set ARGO_PROTO=vless ;; 2) do_set ARGO_PROTO=vmess ;; 3) do_set ARGO_PROTO=trojan ;;
-       esac ;;
+    3) local v; v=$(ask "Argo 协议（逗号分隔，可多选）" "${ARGO_PROTO:-vless,vmess,trojan}"); do_set "ARGO_PROTO=$v" ;;
     4) if sub_on; then do_set SUB=0; else do_set SUB=1; fi ;;
     5) do_set SUB_TOKEN= ;;
     6) argo_port_set ;;
