@@ -27,7 +27,7 @@
 set -o pipefail
 export LANG=en_US.UTF-8
 
-SCRIPT_VERSION="3.3.0"
+SCRIPT_VERSION="3.3.1"
 DIR=/etc/sing-box
 ENV_FILE=$DIR/sb.env
 CONF=$DIR/config.json
@@ -100,6 +100,7 @@ port_free() {
   else return 0; fi
 }
 
+valid_uuid() { [[ "$1" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]; }
 valid_port() { [[ "$1" =~ ^[0-9]+$ ]] && [ "$1" -ge 1 ] && [ "$1" -le 65535 ]; }
 
 ip4() { local u ip; for u in https://api.ipify.org https://ipv4.icanhazip.com https://ifconfig.co; do
@@ -435,6 +436,7 @@ do_install() {
 
   PROTOCOLS=${PROTOCOLS:-$DEFAULT_PROTOCOLS}
   UUID=${UUID:-$(cat /proc/sys/kernel/random/uuid)}
+  valid_uuid "$UUID" || die "UUID 格式不对：$UUID"
   SNI=${SNI:-www.iij.ad.jp}
   CFIP=${CFIP:-cf.090227.xyz}
   CFPORT=${CFPORT:-443}
@@ -479,7 +481,8 @@ do_set() { # KEY=VAL ...
     case "$k" in
       PROTOCOLS) for p in ${v//,/ }; do [[ ",$ALL_PROTOCOLS," == *",$p,"* ]] || die "未知协议：$p"; done; PROTOCOLS=$v ;;
       IP_MODE) case "$v" in auto|4|6|both) IP_MODE=$v ;; *) die "IP_MODE 只能是 auto/4/6/both" ;; esac ;;
-      UUID|SNI|CFIP|CFPORT|NAME|ARGO_DOMAIN|ARGO_TOKEN) printf -v "$k" '%s' "$v" ;;
+      UUID) valid_uuid "$v" || die "UUID 格式不对：$v"; UUID=$v ;;
+      SNI|CFIP|CFPORT|NAME|ARGO_DOMAIN|ARGO_TOKEN) printf -v "$k" '%s' "$v" ;;
       PORT|ARGO_PORT) valid_port "$v" || die "端口无效：$v"; printf -v "$k" '%s' "$v" ;;
       REALITY_PORT|HY2_PORT|TUIC_PORT|ANYTLS_PORT|SOCKS_PORT)
         [ -z "$v" ] || valid_port "$v" || die "端口无效：$v"; printf -v "$k" '%s' "$v" ;;
@@ -563,14 +566,14 @@ ip_menu() {
 }
 
 menu() {
-  load_env
+  local x; load_env
   while true; do
     echo
     c "1;36" "==== sing-box 管理 v$SCRIPT_VERSION ===="
     if [ -f "$ENV_FILE" ]; then do_status; else warn "未安装"; fi
     cat <<'EOF'
  1. 安装 / 重装        2. 查看节点
- 3. 修改端口           4. 更换 UUID
+ 3. 修改端口           4. 修改 UUID
  5. 设置固定隧道       6. 改回临时隧道
  7. 选择协议           8. 重启
  9. 更新内核           10. 卸载
@@ -580,7 +583,7 @@ EOF
       1) do_install ;;
       2) show_nodes ;;
       3) port_menu ;;
-      4) do_set "UUID=$(cat /proc/sys/kernel/random/uuid)" ;;
+      4) x=$(ask "新 UUID（回车随机生成）" ""); do_set "UUID=${x:-$(cat /proc/sys/kernel/random/uuid)}" ;;
       5) do_set "ARGO_TOKEN=$(ask "隧道 Token" "")" "ARGO_DOMAIN=$(ask "隧道域名" "${ARGO_DOMAIN:-}")" ;;
       6) do_set "ARGO_TOKEN=" "ARGO_DOMAIN=" ;;
       7) proto_menu ;;
