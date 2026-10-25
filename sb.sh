@@ -21,12 +21,13 @@
 #   ARGO_DOMAIN 固定隧道绑定的域名（固定隧道必填）
 #   CFIP/CFPORT Argo 节点的优选地址/端口，默认 cf.090227.xyz / 443
 #   NAME        节点名前缀，默认主机名
+#   IP_MODE     节点用哪个 IP：auto（优先 v4）/4/6/both，默认 auto
 #   SB_VERSION  固定 sing-box 版本（需 ≥1.12，如 1.12.9），默认最新正式版
 # Alpine 需先 apk add bash curl
 set -o pipefail
 export LANG=en_US.UTF-8
 
-SCRIPT_VERSION="3.2.0"
+SCRIPT_VERSION="3.3.0"
 DIR=/etc/sing-box
 ENV_FILE=$DIR/sb.env
 CONF=$DIR/config.json
@@ -101,15 +102,21 @@ port_free() {
 
 valid_port() { [[ "$1" =~ ^[0-9]+$ ]] && [ "$1" -ge 1 ] && [ "$1" -le 65535 ]; }
 
-public_ip() {
-  local ip
-  for u in https://api.ipify.org https://ipv4.icanhazip.com https://ifconfig.co; do
-    ip=$(curl -4 -fsS -m 5 "$u" 2>/dev/null | tr -d '[:space:]') && [ -n "$ip" ] && { echo "$ip"; return; }
-  done
-  for u in https://api64.ipify.org https://ipv6.icanhazip.com; do
-    ip=$(curl -6 -fsS -m 5 "$u" 2>/dev/null | tr -d '[:space:]') && [ -n "$ip" ] && { echo "[$ip]"; return; }
-  done
-  die "获取公网 IP 失败"
+ip4() { local u ip; for u in https://api.ipify.org https://ipv4.icanhazip.com https://ifconfig.co; do
+  ip=$(curl -4 -fsS -m 5 "$u" 2>/dev/null | tr -d '[:space:]') && [ -n "$ip" ] && { echo "$ip"; return; }; done; }
+ip6() { local u ip; for u in https://api64.ipify.org https://ipv6.icanhazip.com https://ifconfig.co; do
+  ip=$(curl -6 -fsS -m 5 "$u" 2>/dev/null | tr -d '[:space:]') && [[ "$ip" == *:* ]] && { echo "[$ip]"; return; }; done; }
+
+node_ips() { # 按 IP_MODE 输出“地址 后缀”：auto=优先 v4，4/6=只用该版本，both=两个都出
+  local a b
+  case "${IP_MODE:-auto}" in
+    4)    a=$(ip4); [ -n "$a" ] || die "本机没有可用的 IPv4"; echo "$a" ;;
+    6)    b=$(ip6); [ -n "$b" ] || die "本机没有可用的 IPv6"; echo "$b" ;;
+    both) a=$(ip4); b=$(ip6)
+          [ -n "$a$b" ] || die "获取公网 IP 失败"
+          if [ -n "$a" ] && [ -n "$b" ]; then echo "$a -v4"; echo "$b -v6"; else echo "$a$b"; fi ;;
+    *)    a=$(ip4); [ -n "$a" ] || a=$(ip6); [ -n "$a" ] || die "获取公网 IP 失败"; echo "$a" ;;
+  esac
 }
 
 # ---------- 状态文件（唯一数据源，权限 600）----------
@@ -119,7 +126,7 @@ save_env() {
   local k
   umask 077
   {
-    for k in UUID PORT $PORT_KEYS PROTOCOLS SNI ARGO_PORT ARGO_TOKEN ARGO_DOMAIN CFIP CFPORT NAME \
+    for k in UUID PORT $PORT_KEYS PROTOCOLS IP_MODE SNI ARGO_PORT ARGO_TOKEN ARGO_DOMAIN CFIP CFPORT NAME \
              REALITY_PRIVATE REALITY_PUBLIC REALITY_SID SB_VERSION; do
       printf '%s=%q\n' "$k" "${!k:-}"
     done
@@ -376,13 +383,17 @@ urlenc() { jq -rn --arg s "$1" '$s|@uri'; }
 show_nodes() {
   load_env
   [ -f "$CONF" ] || die "尚未安装"
-  local ip n host; ip=$(public_ip); n=$(urlenc "${NAME}")
+  local ip n host sfx nn ips; ips=$(node_ips) || exit 1; nn=$(urlenc "${NAME}")
   {
+   while read -r ip sfx; do
+    n="$nn$sfx"
     on reality && echo "vless://$UUID@$ip:$(pt reality)?encryption=none&flow=xtls-rprx-vision&security=reality&sni=$SNI&fp=chrome&pbk=$REALITY_PUBLIC&sid=$REALITY_SID&type=tcp#$n-reality"
     on hy2     && echo "hysteria2://$UUID@$ip:$(pt hy2)?sni=www.bing.com&alpn=h3&insecure=1#$n-hy2"
     on tuic    && echo "tuic://$UUID:$UUID@$ip:$(pt tuic)?sni=www.bing.com&alpn=h3&congestion_control=bbr&udp_relay_mode=native&allow_insecure=1#$n-tuic"
     on anytls  && echo "anytls://$UUID@$ip:$(pt anytls)?sni=www.bing.com&insecure=1#$n-anytls"
     on socks   && echo "socks5://${UUID%%-*}:$UUID@$ip:$(pt socks)#$n-socks5"
+   done <<<"$ips"
+    n=$nn
     if on argo; then
       host=$(argo_domain)
       if [ -n "$host" ]; then
@@ -461,11 +472,13 @@ install_self() {
 do_set() { # KEY=VAL ...
   need_root; detect_init; load_env
   [ -f "$ENV_FILE" ] || die "尚未安装"
-  local kv k v p
+  local kv k v p only_view=1
   for kv in "$@"; do
     k=${kv%%=*}; v=${kv#*=}
+    case "$k" in IP_MODE|NAME|CFIP|CFPORT) ;; *) only_view=0 ;; esac
     case "$k" in
       PROTOCOLS) for p in ${v//,/ }; do [[ ",$ALL_PROTOCOLS," == *",$p,"* ]] || die "未知协议：$p"; done; PROTOCOLS=$v ;;
+      IP_MODE) case "$v" in auto|4|6|both) IP_MODE=$v ;; *) die "IP_MODE 只能是 auto/4/6/both" ;; esac ;;
       UUID|SNI|CFIP|CFPORT|NAME|ARGO_DOMAIN|ARGO_TOKEN) printf -v "$k" '%s' "$v" ;;
       PORT|ARGO_PORT) valid_port "$v" || die "端口无效：$v"; printf -v "$k" '%s' "$v" ;;
       REALITY_PORT|HY2_PORT|TUIC_PORT|ANYTLS_PORT|SOCKS_PORT)
@@ -475,7 +488,8 @@ do_set() { # KEY=VAL ...
   done
   check_ports
   if on argo && [ -n "${ARGO_TOKEN:-}" ] && [ -z "${ARGO_DOMAIN:-}" ]; then die "固定隧道需要 ARGO_DOMAIN"; fi
-  apply
+  if [ "$only_view" = 1 ]; then save_env  # 只影响节点显示，不重启（避免临时隧道换域名）
+  else apply; fi
   info "已更新"
   show_nodes
 }
@@ -509,16 +523,42 @@ do_uninstall() {
 }
 
 port_menu() {
-  local x k
-  for x in reality hy2 tuic anytls socks; do on "$x" && echo "  $x：$(pt "$x")"; done
-  echo "  输入 all 改起始端口（各协议顺延），或输入协议名单独改"
-  x=$(ask "要改哪个" "all")
-  case "$x" in
-    all) do_set "PORT=$(ask "新的起始端口" "${PORT:-}")" ;;
-    reality|hy2|tuic|anytls|socks)
-      k="$(tr a-z A-Z <<<"$x")_PORT"
-      do_set "$k=$(ask "$x 新端口（留空=恢复按起始端口推算）" "")" ;;
-    *) warn "无效选项" ;;
+  local list=() x i k
+  for x in reality hy2 tuic anytls socks; do on "$x" && list+=("$x"); done
+  echo "  1. 起始端口（各协议顺延）：$PORT"
+  for i in "${!list[@]}"; do echo "  $((i + 2)). ${list[$i]}：$(pt "${list[$i]}")"; done
+  echo "  0. 返回"
+  i=$(ask "请选择" "")
+  case "$i" in
+    0|"") return ;;
+    1) do_set "PORT=$(ask "新的起始端口" "${PORT:-}")" ;;
+    *) [[ "$i" =~ ^[0-9]+$ ]] && x=${list[$((i - 2))]:-} || x=""
+       [ -n "$x" ] || { warn "无效选项"; return; }
+       k="$(tr a-z A-Z <<<"$x")_PORT"
+       do_set "$k=$(ask "$x 新端口（留空=恢复按起始端口推算）" "")" ;;
+  esac
+}
+
+proto_menu() {
+  local all=(${ALL_PROTOCOLS//,/ }) i sel="" n
+  for i in "${!all[@]}"; do
+    if on "${all[$i]}"; then echo "  $((i + 1)). [✓] ${all[$i]}"; else echo "  $((i + 1)). [ ] ${all[$i]}"; fi
+  done
+  n=$(ask "输入要启用的编号（如 1 2 3 5，回车不变）" "")
+  [ -n "$n" ] || return
+  for i in ${n//,/ }; do
+    [[ "$i" =~ ^[0-9]+$ ]] && [ "$i" -ge 1 ] && [ "$i" -le ${#all[@]} ] || { warn "无效编号：$i"; return; }
+    [[ ",$sel," == *",${all[$((i - 1))]},"* ]] || sel+="${sel:+,}${all[$((i - 1))]}"
+  done
+  do_set "PROTOCOLS=$sel"
+}
+
+ip_menu() {
+  echo "  当前：${IP_MODE:-auto}"
+  echo "  1. 自动（优先 IPv4）  2. 仅 IPv4  3. 仅 IPv6  4. 同时输出 IPv4 和 IPv6"
+  case "$(ask "请选择" "")" in
+    1) do_set IP_MODE=auto ;; 2) do_set IP_MODE=4 ;; 3) do_set IP_MODE=6 ;; 4) do_set IP_MODE=both ;;
+    *) return ;;
   esac
 }
 
@@ -534,7 +574,7 @@ menu() {
  5. 设置固定隧道       6. 改回临时隧道
  7. 选择协议           8. 重启
  9. 更新内核           10. 卸载
- 0. 退出
+11. 节点 IPv4/IPv6     0. 退出
 EOF
     case "$(ask "请选择" "")" in
       1) do_install ;;
@@ -543,10 +583,11 @@ EOF
       4) do_set "UUID=$(cat /proc/sys/kernel/random/uuid)" ;;
       5) do_set "ARGO_TOKEN=$(ask "隧道 Token" "")" "ARGO_DOMAIN=$(ask "隧道域名" "${ARGO_DOMAIN:-}")" ;;
       6) do_set "ARGO_TOKEN=" "ARGO_DOMAIN=" ;;
-      7) do_set "PROTOCOLS=$(ask "协议（可选 $ALL_PROTOCOLS）" "${PROTOCOLS:-$DEFAULT_PROTOCOLS}")" ;;
+      7) proto_menu ;;
       8) do_restart ;;
       9) do_update ;;
       10) [ "$(ask "确认卸载？输入 y" "")" = y ] && do_uninstall ;;
+      11) ip_menu ;;
       0) exit 0 ;;
       *) warn "无效选项" ;;
     esac
