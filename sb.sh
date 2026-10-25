@@ -20,6 +20,7 @@
 #   ARGO_PORT   Argo 本地端口（只监听 127.0.0.1），默认随机
 #   ARGO_TOKEN  固定隧道 Token（不填则用临时隧道 trycloudflare）
 #   ARGO_DOMAIN 固定隧道绑定的域名（固定隧道必填）
+#   SUB         Argo 订阅：1 开启（默认）/0 关闭；只通过 Argo 域名访问，不开公网端口
 #   CFIP/CFPORT Argo 节点的优选地址/端口，默认 cf.090227.xyz / 443
 #   NAME        节点名前缀，默认主机名
 #   IP_MODE     节点用哪个 IP：auto（优先 v4）/4/6/both，默认 auto
@@ -28,7 +29,7 @@
 set -o pipefail
 export LANG=en_US.UTF-8
 
-SCRIPT_VERSION="3.5.1"
+SCRIPT_VERSION="3.6.0"
 DIR=/etc/sing-box
 ENV_FILE=$DIR/sb.env
 CONF=$DIR/config.json
@@ -130,7 +131,7 @@ save_env() {
   umask 077
   {
     for k in UUID PORT $PORT_KEYS PROTOCOLS IP_MODE SNI ARGO_PORT ARGO_TOKEN ARGO_DOMAIN CFIP CFPORT NAME \
-             REALITY_PRIVATE REALITY_PUBLIC REALITY_SID SS_PASSWORD STLS_INNER_PORT ARGO_PROTO SB_VERSION; do
+             REALITY_PRIVATE REALITY_PUBLIC REALITY_SID SS_PASSWORD STLS_INNER_PORT ARGO_PROTO SUB SUB_TOKEN SUB_PORT SB_VERSION; do
       printf '%s=%q\n' "$k" "${!k:-}"
     done
   } > "$ENV_FILE"
@@ -138,6 +139,7 @@ save_env() {
 }
 
 on() { [[ ",$PROTOCOLS," == *",$1,"* ]]; }
+sub_on() { on argo && [ "${SUB:-1}" != 0 ]; }
 
 # 各协议端口：单独设置优先，否则按 PORT 推算
 PORT_KEYS="REALITY_PORT HY2_PORT TUIC_PORT ANYTLS_PORT SOCKS_PORT SS_PORT TROJAN_PORT VMESS_PORT SHADOWTLS_PORT"
@@ -156,7 +158,7 @@ pt() {
 }
 
 check_ports() { # 已启用协议的端口必须合法且互不冲突
-  local seen=" $ARGO_PORT ${STLS_INNER_PORT:-} " x p
+  local seen=" $ARGO_PORT ${STLS_INNER_PORT:-} ${SUB_PORT:-} " x p
   for x in $DIRECT; do
     on "$x" || continue
     p=$(pt "$x")
@@ -227,6 +229,8 @@ ensure_keys() {
   [ -n "${REALITY_SID:-}" ] || REALITY_SID=$(openssl rand -hex 8)
   [ -n "${SS_PASSWORD:-}" ] || SS_PASSWORD=$(openssl rand -base64 16)
   [ -n "${STLS_INNER_PORT:-}" ] || STLS_INNER_PORT=$(rand_port)
+  [ -n "${SUB_TOKEN:-}" ] || SUB_TOKEN=$(openssl rand -hex 12)
+  [ -n "${SUB_PORT:-}" ] || SUB_PORT=$(rand_port)
 }
 
 # ---------- 生成配置 ----------
@@ -296,12 +300,21 @@ build_config() {
         transport:{type:\"ws\", path:\"/argo\", early_data_header_name:\"Sec-WebSocket-Protocol\"}}]" <<<"$inb")
   fi
 
-  jq -n --argjson inb "$inb" '{
+  # Argo 订阅：借用 sing-box 自带的静态文件服务（clash_api external_ui），只监听 127.0.0.1，经隧道按路径转发
+  local exp='{}'
+  if sub_on; then
+    mkdir -p "$DIR/sub/$SUB_TOKEN"; : > "$DIR/sub/index.html"; : > "$DIR/sub/$SUB_TOKEN/index.html"
+    exp=$(jq -n --arg c "127.0.0.1:$SUB_PORT" --arg u "$DIR/sub" --arg s "$(openssl rand -hex 16)" \
+      '{clash_api:{external_controller:$c, external_ui:$u, secret:$s}}')
+  fi
+
+  jq -n --argjson inb "$inb" --argjson exp "$exp" '{
     log:{level:"warn", timestamp:true},
     dns:{servers:[{type:"local", tag:"local"}]},
     inbounds:$inb,
     outbounds:[{type:"direct", tag:"direct"}],
-    route:{final:"direct", default_domain_resolver:"local"}}' > "$CONF.new"
+    route:{final:"direct", default_domain_resolver:"local"}}
+    + (if $exp == {} then {} else {experimental:$exp} end)' > "$CONF.new"
   chmod 600 "$CONF.new"
   "$BIN_SB" check -c "$CONF.new" || { rm -f "$CONF.new"; die "配置校验失败，未改动现有配置"; }
   mv -f "$CONF.new" "$CONF"
@@ -381,6 +394,11 @@ setup_argo_service() {
     write_service sb-argo "Cloudflare Tunnel (sing-box)" "$cmd run" "$DIR/argo.env"
   else
     rm -f "$DIR/argo.env"
+    if sub_on; then  # 临时隧道：本地 ingress 按路径分流，订阅路径 → 订阅服务，其余 → Argo 节点
+      ( umask 077; printf 'ingress:\n  - path: ^/ui/%s/\n    service: http://127.0.0.1:%s\n  - service: http://127.0.0.1:%s\n' \
+        "$SUB_TOKEN" "$SUB_PORT" "$ARGO_PORT" > "$DIR/argo.yml" )
+      cmd="$cmd --config $DIR/argo.yml"
+    else rm -f "$DIR/argo.yml"; fi
     write_service sb-argo "Cloudflare Tunnel (sing-box)" "$cmd --url http://127.0.0.1:$ARGO_PORT"
   fi
   : > "$DIR/sb-argo.log"
@@ -459,12 +477,22 @@ show_nodes() {
     fi
   } > "$NODES.new"
   mv -f "$NODES.new" "$NODES"; chmod 600 "$NODES"
+  if sub_on && [ -d "$DIR/sub/$SUB_TOKEN" ]; then
+    { base64 -w0 "$NODES" 2>/dev/null || base64 "$NODES" | tr -d '\n'; } > "$DIR/sub/$SUB_TOKEN/sub"
+    cp -f "$NODES" "$DIR/sub/$SUB_TOKEN/raw"
+  fi
   echo; c "1;35" "$(cat "$NODES")"; echo
   info "Base64（客户端可直接导入）："
   base64 -w0 "$NODES" 2>/dev/null || base64 "$NODES" | tr -d '\n'; echo
   { on hy2 || on tuic || on anytls || on trojan; } && warn "Hy2/TUIC/AnyTLS/Trojan 用自签证书，客户端需开启“跳过证书验证”"
   on shadowtls && warn "ShadowTLS 链接为 Shadowrocket 格式；其他客户端手填：SS-2022 aes-128-gcm + ShadowTLS v3，SNI www.bing.com，密码=UUID"
   [ -n "${ARGO_TOKEN:-}" ] && on argo && warn "固定隧道：请在 Cloudflare 把 $ARGO_DOMAIN 指向 http://localhost:$ARGO_PORT"
+  if sub_on && [ -n "${host:-}" ]; then
+    info "订阅链接（Base64，只经 Argo 域名访问；明文把 sub 换成 raw）："
+    echo "https://$host/ui/$SUB_TOKEN/sub"
+    [ -n "${ARGO_TOKEN:-}" ] && warn "固定隧道需在 Cloudflare 同域名再加一条路由：路径 ^/ui/$SUB_TOKEN/ → http://localhost:$SUB_PORT，并排在无路径那条之前"
+    [ -z "${ARGO_TOKEN:-}" ] && warn "临时隧道重启后域名会变，订阅链接随之变化；执行 sb nodes 查看新链接"
+  fi
   return 0
 }
 
@@ -486,7 +514,7 @@ do_install() {
   if [ -f "$ENV_FILE" ]; then
     warn "检测到已安装，将保留现有设置重新安装（命令行传入的变量优先）"
     local k ov=()
-    for k in UUID PORT $PORT_KEYS PROTOCOLS IP_MODE ARGO_PROTO SNI ARGO_PORT ARGO_TOKEN ARGO_DOMAIN CFIP CFPORT NAME SB_VERSION; do
+    for k in UUID PORT $PORT_KEYS PROTOCOLS IP_MODE ARGO_PROTO SUB SNI ARGO_PORT ARGO_TOKEN ARGO_DOMAIN CFIP CFPORT NAME SB_VERSION; do
       [ -n "${!k+x}" ] && ov+=("$k=${!k}")
     done
     load_env
@@ -569,6 +597,8 @@ do_set() { # KEY=VAL ...
     case "$k" in
       PROTOCOLS) for p in ${v//,/ }; do [[ ",$ALL_PROTOCOLS," == *",$p,"* ]] || die "未知协议：$p"; done; PROTOCOLS=$v ;;
       ARGO_PROTO) case "$v" in vless|vmess|trojan) ARGO_PROTO=$v ;; *) die "ARGO_PROTO 只能是 vless/vmess/trojan" ;; esac ;;
+      SUB) case "$v" in 0|1) SUB=$v ;; *) die "SUB 只能是 0 或 1" ;; esac ;;
+      SUB_TOKEN) [ -n "$v" ] || v=$(openssl rand -hex 12); [[ "$v" =~ ^[A-Za-z0-9_-]{8,64}$ ]] || die "SUB_TOKEN 需 8-64 位字母数字"; rm -rf "$DIR/sub"; SUB_TOKEN=$v ;;
       IP_MODE) case "$v" in auto|4|6|both) IP_MODE=$v ;; *) die "IP_MODE 只能是 auto/4/6/both" ;; esac ;;
       UUID) valid_uuid "$v" || die "UUID 格式不对：$v"; UUID=$v ;;
       SNI|CFIP|CFPORT|NAME|ARGO_DOMAIN|ARGO_TOKEN) printf -v "$k" '%s' "$v" ;;
@@ -679,6 +709,7 @@ menu() {
  7. 选择协议           8. 重启
  9. 更新内核           10. 卸载
 11. 节点 IPv4/IPv6     12. Argo 协议
+13. Argo 订阅
  0. 退出
 EOF
     case "$(ask "请选择" "")" in
@@ -695,6 +726,10 @@ EOF
       11) ip_menu ;;
       12) case "$(ask "Argo 协议：1 vless  2 vmess  3 trojan" "")" in
             1) do_set ARGO_PROTO=vless ;; 2) do_set ARGO_PROTO=vmess ;; 3) do_set ARGO_PROTO=trojan ;;
+          esac ;;
+      13) echo "  当前：$(sub_on && echo 开启 || echo 关闭)"
+          case "$(ask "1 开启  2 关闭  3 更换订阅令牌" "")" in
+            1) do_set SUB=1 ;; 2) do_set SUB=0 ;; 3) do_set SUB_TOKEN= ;;
           esac ;;
       0) exit 0 ;;
       *) warn "无效选项" ;;
