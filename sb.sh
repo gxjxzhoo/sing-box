@@ -27,7 +27,7 @@
 set -o pipefail
 export LANG=en_US.UTF-8
 
-SCRIPT_VERSION="3.3.1"
+SCRIPT_VERSION="3.3.2"
 DIR=/etc/sing-box
 ENV_FILE=$DIR/sb.env
 CONF=$DIR/config.json
@@ -429,8 +429,14 @@ apply() { # 生成配置并（重）启动
 do_install() {
   need_root; detect_init; detect_arch; ensure_deps
   if [ -f "$ENV_FILE" ]; then
-    warn "检测到已安装，将保留现有设置重新安装（要全新安装请先卸载）"
+    warn "检测到已安装，将保留现有设置重新安装（命令行传入的变量优先）"
+    local k ov=()
+    for k in UUID PORT $PORT_KEYS PROTOCOLS IP_MODE SNI ARGO_PORT ARGO_TOKEN ARGO_DOMAIN CFIP CFPORT NAME SB_VERSION; do
+      [ -n "${!k+x}" ] && ov+=("$k=${!k}")
+    done
     load_env
+    for k in "${ov[@]}"; do printf -v "${k%%=*}" '%s' "${k#*=}"; done
+    [ ${#ov[@]} -gt 0 ] && info "使用传入的：${ov[*]%%=*}"
   fi
   mkdir -p "$DIR"; chmod 700 "$DIR"
 
