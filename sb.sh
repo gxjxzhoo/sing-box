@@ -30,7 +30,7 @@
 set -o pipefail
 export LANG=en_US.UTF-8
 
-SCRIPT_VERSION="3.7.3"
+SCRIPT_VERSION="3.7.4"
 DIR=/etc/sing-box
 ENV_FILE=$DIR/sb.env
 CONF=$DIR/config.json
@@ -609,7 +609,8 @@ do_install() {
   ARGO_PORT=${ARGO_PORT:-$(rand_port)}
   check_ports
   if on argo && [ -z "${ARGO_PROTO:-}" ] && [ -t 0 ] && [ ! -f "$ENV_FILE" ]; then
-    case "$(ask "Argo 隧道协议：1 vless  2 vmess  3 trojan（回车 vless）" "")" in
+    echo "Argo 隧道协议：" >&2; printf '  %s\n' "1. vless（默认）" "2. vmess" "3. trojan" >&2
+    case "$(ask "请选择（回车 vless）" "")" in
       2) ARGO_PROTO=vmess ;; 3) ARGO_PROTO=trojan ;; *) ARGO_PROTO=vless ;;
     esac
   fi
@@ -756,7 +757,7 @@ proto_menu() {
 
 ip_menu() {
   echo "  当前：${IP_MODE:-auto}"
-  echo "  1. 自动（优先 IPv4）  2. 仅 IPv4  3. 仅 IPv6  4. 同时输出 IPv4 和 IPv6"
+  printf '  %s\n' "1. 自动（优先 IPv4）" "2. 仅 IPv4" "3. 仅 IPv6" "4. 同时输出 IPv4 和 IPv6" "0. 返回"
   case "$(ask "请选择" "")" in
     1) do_set IP_MODE=auto ;; 2) do_set IP_MODE=4 ;; 3) do_set IP_MODE=6 ;; 4) do_set IP_MODE=both ;;
   esac
@@ -766,13 +767,12 @@ argo_menu() {
   on argo || { warn "未启用 Argo，请先在「选择协议」里勾选"; return; }
   local t="临时隧道"; [ -n "${ARGO_TOKEN:-}" ] && t="固定隧道（$ARGO_DOMAIN）"
   echo "  隧道：$t   协议：${ARGO_PROTO:-vless}   订阅：$(sub_on && echo 开启 || echo 关闭)"
-  echo "  1. 设置固定隧道      2. 改回临时隧道"
-  echo "  3. 切换隧道协议      4. 订阅开/关"
-  echo "  5. 更换订阅令牌      0. 返回"
+  printf '  %s\n' "1. 设置固定隧道" "2. 改回临时隧道" "3. 切换隧道协议" "4. 订阅开/关" "5. 更换订阅令牌" "0. 返回"
   case "$(ask "请选择" "")" in
     1) do_set "ARGO_TOKEN=$(ask "隧道 Token" "")" "ARGO_DOMAIN=$(ask "隧道域名" "${ARGO_DOMAIN:-}")" ;;
     2) do_set "ARGO_TOKEN=" "ARGO_DOMAIN=" ;;
-    3) case "$(ask "1 vless  2 vmess  3 trojan" "")" in
+    3) printf '  %s\n' "1. vless" "2. vmess" "3. trojan"
+       case "$(ask "请选择" "")" in
          1) do_set ARGO_PROTO=vless ;; 2) do_set ARGO_PROTO=vmess ;; 3) do_set ARGO_PROTO=trojan ;;
        esac ;;
     4) if sub_on; then do_set SUB=0; else do_set SUB=1; fi ;;
@@ -782,7 +782,7 @@ argo_menu() {
 
 update_menu() {
   echo "  内核：$("$BIN_SB" version 2>/dev/null | head -1 | awk '{print $3}')   脚本：v$SCRIPT_VERSION"
-  echo "  1. 更新 sing-box/cloudflared 内核   2. 更新本脚本   0. 返回"
+  printf '  %s\n' "1. 更新 sing-box/cloudflared 内核" "2. 更新本脚本" "0. 返回"
   case "$(ask "请选择" "")" in
     1) do_update ;; 2) do_upgrade ;;
   esac
@@ -815,12 +815,16 @@ menu() {
     cat <<'EOF'
  1. 查看节点 / 订阅
  ─── 配置 ───
- 2. 选择协议          3. 修改端口
- 4. 修改 UUID         5. 节点 IP（v4/v6）
+ 2. 选择协议
+ 3. 修改端口
+ 4. 修改 UUID
+ 5. 节点 IP（v4/v6）
  6. Argo 隧道 / 订阅
  ─── 维护 ───
- 7. 重启              8. 更新
- 9. 重装（保留设置）  10. 卸载
+ 7. 重启
+ 8. 更新
+ 9. 重装（保留设置）
+10. 卸载
  0. 退出
 EOF
     x=$(ask "请选择" "")
