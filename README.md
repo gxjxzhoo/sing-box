@@ -28,7 +28,7 @@ sb               # 菜单
 sb nodes         # 查看节点
 sb set PORT=30000 UUID=...      # 改设置并重建
 sb set PROTOCOLS=reality,hy2    # 只开部分协议
-sb restart | status | update | uninstall
+sb restart | status | update | upgrade | uninstall   # upgrade=更新脚本本身
 ```
 
 固定隧道：在 Cloudflare Zero Trust 把域名的 Public Hostname 指向 `http://localhost:<ARGO_PORT>`（`sb nodes` 会提示端口）。
