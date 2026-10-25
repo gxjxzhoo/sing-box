@@ -28,7 +28,7 @@
 set -o pipefail
 export LANG=en_US.UTF-8
 
-SCRIPT_VERSION="3.5.0"
+SCRIPT_VERSION="3.5.1"
 DIR=/etc/sing-box
 ENV_FILE=$DIR/sb.env
 CONF=$DIR/config.json
@@ -636,7 +636,7 @@ pick_protocols() {
   local all=(${ALL_PROTOCOLS//,/ }) desc=("VLESS-Reality" "Hysteria2" "TUIC v5" "AnyTLS" "Argo 隧道（${ARGO_PROTO:-vless}-WS）" "Socks5" "Shadowsocks-2022" "Trojan（TLS）" "VMess-WS" "ShadowTLS v3")
   local L=abcdefghij i n sel="" tok idx
   for i in "${!all[@]}"; do
-    if on "${all[$i]}"; then tok="[✓]"; else tok="[ ]"; fi
+    if on "${all[$i]}"; then tok="[x]"; else tok="[ ]"; fi
     printf '  %s. %s %s\n' "${L:$i:1}" "$tok" "${desc[$i]}" >&2
   done
   n=$(ask "输入要启用的协议（如 abce，回车=${1:-不变}）" "")
