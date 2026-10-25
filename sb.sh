@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # sing-box 一键脚本（单文件重写版）
-# 入站：VLESS-Reality / Hysteria2 / TUIC v5 / AnyTLS / Socks5（直连）+ VLESS-WS（Cloudflare Argo 隧道）
+# 入站：VLESS-Reality / Hysteria2 / TUIC v5 / AnyTLS / Socks5 / SS-2022 / Trojan / VMess-WS / ShadowTLS（直连）+ VLESS-WS（Cloudflare Argo 隧道）
 # 支持：Debian/Ubuntu/CentOS/RHEL/Alpine，systemd 或 OpenRC；amd64/arm64/armv7/386
 #
 # 用法：
@@ -11,9 +11,10 @@
 #   bash sb.sh restart|status|update|uninstall
 #
 # 安装时可用的环境变量：
-#   PORT        直连起始端口（Reality=PORT，Hy2=+1，TUIC=+2，AnyTLS=+3，Socks5=+4；默认随机）
-#   REALITY_PORT/HY2_PORT/TUIC_PORT/ANYTLS_PORT/SOCKS_PORT  单独指定某协议端口（留空=按 PORT 推算）
-#   PROTOCOLS   要启用的协议，逗号分隔，默认 reality,hy2,tuic,anytls,argo；可加 socks
+#   PORT        直连起始端口（Reality=PORT，Hy2=+1，TUIC=+2，AnyTLS=+3，Socks5=+4，SS=+5，Trojan=+6，VMess=+7，ShadowTLS=+8；默认随机）
+#   REALITY_PORT/HY2_PORT/TUIC_PORT/ANYTLS_PORT/SOCKS_PORT/SS_PORT/TROJAN_PORT/VMESS_PORT/SHADOWTLS_PORT  单独指定某协议端口（留空=按 PORT 推算）
+#   PROTOCOLS   要启用的协议，逗号分隔，默认 reality,hy2,tuic,anytls,argo；可加 socks,ss,trojan,vmess,shadowtls
+#   ARGO_PROTO  Argo 隧道里跑的协议：vless（默认）/vmess/trojan
 #   UUID        默认随机
 #   SNI         Reality 偷取的站点，默认 www.iij.ad.jp
 #   ARGO_PORT   Argo 本地端口（只监听 127.0.0.1），默认随机
@@ -27,7 +28,7 @@
 set -o pipefail
 export LANG=en_US.UTF-8
 
-SCRIPT_VERSION="3.4.1"
+SCRIPT_VERSION="3.5.0"
 DIR=/etc/sing-box
 ENV_FILE=$DIR/sb.env
 CONF=$DIR/config.json
@@ -36,7 +37,8 @@ BIN_SB=$DIR/sing-box
 BIN_CF=$DIR/cloudflared
 SELF=/usr/local/bin/sb
 SCRIPT_URL=${SCRIPT_URL:-https://raw.githubusercontent.com/gxjxzhoo/sing-box/main/sb.sh}
-ALL_PROTOCOLS="reality,hy2,tuic,anytls,argo,socks"
+ALL_PROTOCOLS="reality,hy2,tuic,anytls,argo,socks,ss,trojan,vmess,shadowtls"
+DIRECT="reality hy2 tuic anytls socks ss trojan vmess shadowtls"
 DEFAULT_PROTOCOLS="reality,hy2,tuic,anytls,argo"
 
 # ---------- 输出 ----------
@@ -128,7 +130,7 @@ save_env() {
   umask 077
   {
     for k in UUID PORT $PORT_KEYS PROTOCOLS IP_MODE SNI ARGO_PORT ARGO_TOKEN ARGO_DOMAIN CFIP CFPORT NAME \
-             REALITY_PRIVATE REALITY_PUBLIC REALITY_SID SB_VERSION; do
+             REALITY_PRIVATE REALITY_PUBLIC REALITY_SID SS_PASSWORD STLS_INNER_PORT ARGO_PROTO SB_VERSION; do
       printf '%s=%q\n' "$k" "${!k:-}"
     done
   } > "$ENV_FILE"
@@ -138,7 +140,7 @@ save_env() {
 on() { [[ ",$PROTOCOLS," == *",$1,"* ]]; }
 
 # 各协议端口：单独设置优先，否则按 PORT 推算
-PORT_KEYS="REALITY_PORT HY2_PORT TUIC_PORT ANYTLS_PORT SOCKS_PORT"
+PORT_KEYS="REALITY_PORT HY2_PORT TUIC_PORT ANYTLS_PORT SOCKS_PORT SS_PORT TROJAN_PORT VMESS_PORT SHADOWTLS_PORT"
 pt() {
   case "$1" in
     reality) echo "${REALITY_PORT:-$PORT}" ;;
@@ -146,12 +148,16 @@ pt() {
     tuic)    echo "${TUIC_PORT:-$((PORT + 2))}" ;;
     anytls)  echo "${ANYTLS_PORT:-$((PORT + 3))}" ;;
     socks)   echo "${SOCKS_PORT:-$((PORT + 4))}" ;;
+    ss)      echo "${SS_PORT:-$((PORT + 5))}" ;;
+    trojan)  echo "${TROJAN_PORT:-$((PORT + 6))}" ;;
+    vmess)   echo "${VMESS_PORT:-$((PORT + 7))}" ;;
+    shadowtls) echo "${SHADOWTLS_PORT:-$((PORT + 8))}" ;;
   esac
 }
 
 check_ports() { # 已启用协议的端口必须合法且互不冲突
-  local seen=" $ARGO_PORT " x p
-  for x in reality hy2 tuic anytls socks; do
+  local seen=" $ARGO_PORT ${STLS_INNER_PORT:-} " x p
+  for x in $DIRECT; do
     on "$x" || continue
     p=$(pt "$x")
     valid_port "$p" || die "$x 端口无效：$p"
@@ -219,6 +225,8 @@ ensure_keys() {
     REALITY_PUBLIC=$(awk -F': *' '/PublicKey/{print $2}' <<<"$out")
   fi
   [ -n "${REALITY_SID:-}" ] || REALITY_SID=$(openssl rand -hex 8)
+  [ -n "${SS_PASSWORD:-}" ] || SS_PASSWORD=$(openssl rand -base64 16)
+  [ -n "${STLS_INNER_PORT:-}" ] || STLS_INNER_PORT=$(rand_port)
 }
 
 # ---------- 生成配置 ----------
@@ -254,10 +262,39 @@ build_config() {
         type:"socks", tag:"socks", listen:"::", listen_port:$p,
         users:[{username:$n, password:$u}]}]' <<<"$inb")
 
-  on argo && inb=$(jq --argjson p "$ARGO_PORT" --arg u "$UUID" '. + [{
-        type:"vless", tag:"argo", listen:"127.0.0.1", listen_port:$p,
-        users:[{uuid:$u}],
-        transport:{type:"ws", path:"/argo", early_data_header_name:"Sec-WebSocket-Protocol"}}]' <<<"$inb")
+  on ss && inb=$(jq --argjson p "$(pt ss)" --arg pw "$SS_PASSWORD" '. + [{
+        type:"shadowsocks", tag:"ss", listen:"::", listen_port:$p,
+        method:"2022-blake3-aes-128-gcm", password:$pw}]' <<<"$inb")
+
+  on trojan && inb=$(jq --argjson p "$(pt trojan)" --arg u "$UUID" --argjson t "$tls" '. + [{
+        type:"trojan", tag:"trojan", listen:"::", listen_port:$p,
+        users:[{password:$u}], tls:$t}]' <<<"$inb")
+
+  on vmess && inb=$(jq --argjson p "$(pt vmess)" --arg u "$UUID" '. + [{
+        type:"vmess", tag:"vmess", listen:"::", listen_port:$p,
+        users:[{uuid:$u, alterId:0}],
+        transport:{type:"ws", path:"/vmess", early_data_header_name:"Sec-WebSocket-Protocol"}}]' <<<"$inb")
+
+  # ShadowTLS v3：对外握手伪装 www.bing.com，内层是只听本机的 SS-2022
+  on shadowtls && inb=$(jq --argjson p "$(pt shadowtls)" --argjson ip "$STLS_INNER_PORT" \
+      --arg u "$UUID" --arg pw "$SS_PASSWORD" '. + [{
+        type:"shadowtls", tag:"shadowtls", listen:"::", listen_port:$p, version:3,
+        users:[{name:"sb", password:$u}], handshake:{server:"www.bing.com", server_port:443},
+        strict_mode:true, detour:"stls-ss"},
+       {type:"shadowsocks", tag:"stls-ss", listen:"127.0.0.1", listen_port:$ip,
+        method:"2022-blake3-aes-128-gcm", password:$pw}]' <<<"$inb")
+
+  if on argo; then
+    local au
+    case "${ARGO_PROTO:-vless}" in
+      vmess)  au='[{uuid:$u, alterId:0}]' ;;
+      trojan) au='[{password:$u}]' ;;
+      *)      au='[{uuid:$u}]' ;;
+    esac
+    inb=$(jq --argjson p "$ARGO_PORT" --arg u "$UUID" --arg ty "${ARGO_PROTO:-vless}" ". + [{
+        type:\$ty, tag:\"argo\", listen:\"127.0.0.1\", listen_port:\$p, users:$au,
+        transport:{type:\"ws\", path:\"/argo\", early_data_header_name:\"Sec-WebSocket-Protocol\"}}]" <<<"$inb")
+  fi
 
   jq -n --argjson inb "$inb" '{
     log:{level:"warn", timestamp:true},
@@ -358,6 +395,10 @@ open_ports() {
   on tuic && udp+=("$(pt tuic)")
   on anytls && tcp+=("$(pt anytls)")
   on socks && { tcp+=("$(pt socks)"); udp+=("$(pt socks)"); }
+  on ss && { tcp+=("$(pt ss)"); udp+=("$(pt ss)"); }
+  on trojan && tcp+=("$(pt trojan)")
+  on vmess && tcp+=("$(pt vmess)")
+  on shadowtls && tcp+=("$(pt shadowtls)")
   if has ufw && ufw status 2>/dev/null | grep -q active; then
     for p in "${tcp[@]}"; do ufw allow "$p/tcp" >/dev/null; done
     for p in "${udp[@]}"; do ufw allow "$p/udp" >/dev/null; done
@@ -380,6 +421,11 @@ argo_domain() {
 }
 
 urlenc() { jq -rn --arg s "$1" '$s|@uri'; }
+b64() { printf '%s' "$1" | base64 -w0 2>/dev/null || printf '%s' "$1" | base64 | tr -d '\n'; }
+vmess_b64() { # 名称 地址 端口 host path tls
+  b64 "$(jq -cn --arg ps "$1" --arg add "$2" --arg port "$3" --arg id "$UUID" --arg host "$4" --arg path "$5" --arg tls "$6" \
+    '{v:"2", ps:$ps, add:$add, port:$port, id:$id, aid:"0", scy:"auto", net:"ws", type:"none", host:$host, path:$path, tls:$tls, sni:$host}')"
+}
 
 show_nodes() {
   load_env
@@ -393,12 +439,20 @@ show_nodes() {
     on tuic    && echo "tuic://$UUID:$UUID@$ip:$(pt tuic)?sni=www.bing.com&alpn=h3&congestion_control=bbr&udp_relay_mode=native&allow_insecure=1#$n-tuic"
     on anytls  && echo "anytls://$UUID@$ip:$(pt anytls)?sni=www.bing.com&insecure=1#$n-anytls"
     on socks   && echo "socks5://${UUID%%-*}:$UUID@$ip:$(pt socks)#$n-socks5"
+    on ss      && echo "ss://$(b64 "2022-blake3-aes-128-gcm:$SS_PASSWORD")@$ip:$(pt ss)#$n-ss"
+    on trojan  && echo "trojan://$UUID@$ip:$(pt trojan)?security=tls&sni=www.bing.com&allowInsecure=1&type=tcp#$n-trojan"
+    on vmess   && echo "vmess://$(vmess_b64 "${NAME}$sfx-vmess" "${ip//[\[\]]/}" "$(pt vmess)" "" "/vmess?ed=2560" "")"
+    on shadowtls && echo "ss://$(b64 "2022-blake3-aes-128-gcm:$SS_PASSWORD")@$ip:$(pt shadowtls)?shadow-tls=$(b64 "{\"version\":\"3\",\"host\":\"www.bing.com\",\"password\":\"$UUID\"}")#$n-shadowtls"
    done <<<"$ips"
     n=$nn
     if on argo; then
       host=$(argo_domain)
       if [ -n "$host" ]; then
-        echo "vless://$UUID@$CFIP:$CFPORT?encryption=none&security=tls&sni=$host&fp=chrome&type=ws&host=$host&path=%2Fargo%3Fed%3D2560#$n-argo"
+        case "${ARGO_PROTO:-vless}" in
+          vmess)  echo "vmess://$(vmess_b64 "${NAME}-argo" "$CFIP" "$CFPORT" "$host" "/argo?ed=2560" tls)" ;;
+          trojan) echo "trojan://$UUID@$CFIP:$CFPORT?security=tls&sni=$host&fp=chrome&type=ws&host=$host&path=%2Fargo%3Fed%3D2560#$n-argo" ;;
+          *)      echo "vless://$UUID@$CFIP:$CFPORT?encryption=none&security=tls&sni=$host&fp=chrome&type=ws&host=$host&path=%2Fargo%3Fed%3D2560#$n-argo" ;;
+        esac
       else
         warn "未获取到 Argo 域名，稍后执行 sb nodes 再试" >&2
       fi
@@ -408,7 +462,8 @@ show_nodes() {
   echo; c "1;35" "$(cat "$NODES")"; echo
   info "Base64（客户端可直接导入）："
   base64 -w0 "$NODES" 2>/dev/null || base64 "$NODES" | tr -d '\n'; echo
-  on hy2 || on tuic || on anytls && warn "Hy2/TUIC/AnyTLS 用自签证书，客户端需开启“跳过证书验证”"
+  { on hy2 || on tuic || on anytls || on trojan; } && warn "Hy2/TUIC/AnyTLS/Trojan 用自签证书，客户端需开启“跳过证书验证”"
+  on shadowtls && warn "ShadowTLS 链接为 Shadowrocket 格式；其他客户端手填：SS-2022 aes-128-gcm + ShadowTLS v3，SNI www.bing.com，密码=UUID"
   [ -n "${ARGO_TOKEN:-}" ] && on argo && warn "固定隧道：请在 Cloudflare 把 $ARGO_DOMAIN 指向 http://localhost:$ARGO_PORT"
   return 0
 }
@@ -431,7 +486,7 @@ do_install() {
   if [ -f "$ENV_FILE" ]; then
     warn "检测到已安装，将保留现有设置重新安装（命令行传入的变量优先）"
     local k ov=()
-    for k in UUID PORT $PORT_KEYS PROTOCOLS IP_MODE SNI ARGO_PORT ARGO_TOKEN ARGO_DOMAIN CFIP CFPORT NAME SB_VERSION; do
+    for k in UUID PORT $PORT_KEYS PROTOCOLS IP_MODE ARGO_PROTO SNI ARGO_PORT ARGO_TOKEN ARGO_DOMAIN CFIP CFPORT NAME SB_VERSION; do
       [ -n "${!k+x}" ] && ov+=("$k=${!k}")
     done
     load_env
@@ -455,7 +510,7 @@ do_install() {
     # 交互安装：逐个询问已选直连协议的端口，回车随机
     local x v pk
     PORT=$(rand_port)
-    for x in reality hy2 tuic anytls socks; do
+    for x in $DIRECT; do
       on "$x" || continue
       pk="$(tr a-z A-Z <<<"$x")_PORT"
       [ -n "${!pk:-}" ] && continue
@@ -471,6 +526,12 @@ do_install() {
   valid_port "$PORT" || die "端口无效：$PORT"
   ARGO_PORT=${ARGO_PORT:-$(rand_port)}
   check_ports
+  if on argo && [ -z "${ARGO_PROTO:-}" ] && [ -t 0 ] && [ ! -f "$ENV_FILE" ]; then
+    case "$(ask "Argo 隧道协议：1 vless  2 vmess  3 trojan（回车 vless）" "")" in
+      2) ARGO_PROTO=vmess ;; 3) ARGO_PROTO=trojan ;; *) ARGO_PROTO=vless ;;
+    esac
+  fi
+  ARGO_PROTO=${ARGO_PROTO:-vless}
   if on argo && [ -z "${ARGO_TOKEN:-}" ] && [ -t 0 ] && [ ! -f "$ENV_FILE" ]; then
     ARGO_TOKEN=$(ask "Argo 固定隧道 Token（回车用临时隧道）" "")
     [ -n "$ARGO_TOKEN" ] && ARGO_DOMAIN=$(ask "固定隧道域名" "${ARGO_DOMAIN:-}")
@@ -507,11 +568,12 @@ do_set() { # KEY=VAL ...
     case "$k" in IP_MODE|NAME|CFIP|CFPORT) ;; *) only_view=0 ;; esac
     case "$k" in
       PROTOCOLS) for p in ${v//,/ }; do [[ ",$ALL_PROTOCOLS," == *",$p,"* ]] || die "未知协议：$p"; done; PROTOCOLS=$v ;;
+      ARGO_PROTO) case "$v" in vless|vmess|trojan) ARGO_PROTO=$v ;; *) die "ARGO_PROTO 只能是 vless/vmess/trojan" ;; esac ;;
       IP_MODE) case "$v" in auto|4|6|both) IP_MODE=$v ;; *) die "IP_MODE 只能是 auto/4/6/both" ;; esac ;;
       UUID) valid_uuid "$v" || die "UUID 格式不对：$v"; UUID=$v ;;
       SNI|CFIP|CFPORT|NAME|ARGO_DOMAIN|ARGO_TOKEN) printf -v "$k" '%s' "$v" ;;
       PORT|ARGO_PORT) valid_port "$v" || die "端口无效：$v"; printf -v "$k" '%s' "$v" ;;
-      REALITY_PORT|HY2_PORT|TUIC_PORT|ANYTLS_PORT|SOCKS_PORT)
+      REALITY_PORT|HY2_PORT|TUIC_PORT|ANYTLS_PORT|SOCKS_PORT|SS_PORT|TROJAN_PORT|VMESS_PORT|SHADOWTLS_PORT)
         [ -z "$v" ] || valid_port "$v" || die "端口无效：$v"; printf -v "$k" '%s' "$v" ;;
       *) die "不支持的设置：$k" ;;
     esac
@@ -554,7 +616,7 @@ do_uninstall() {
 
 port_menu() {
   local list=() x i k
-  for x in reality hy2 tuic anytls socks; do on "$x" && list+=("$x"); done
+  for x in $DIRECT; do on "$x" && list+=("$x"); done
   echo "  1. 起始端口（各协议顺延）：$PORT"
   for i in "${!list[@]}"; do echo "  $((i + 2)). ${list[$i]}：$(pt "${list[$i]}")"; done
   echo "  0. 返回"
@@ -571,7 +633,7 @@ port_menu() {
 
 # 协议选择：字母 a-f（也接受数字 1-6），可连写 abce 或用空格/逗号分隔；输出逗号列表，回车输出空
 pick_protocols() {
-  local all=(${ALL_PROTOCOLS//,/ }) desc=("VLESS-Reality" "Hysteria2" "TUIC v5" "AnyTLS" "Argo 隧道（VLESS-WS）" "Socks5")
+  local all=(${ALL_PROTOCOLS//,/ }) desc=("VLESS-Reality" "Hysteria2" "TUIC v5" "AnyTLS" "Argo 隧道（${ARGO_PROTO:-vless}-WS）" "Socks5" "Shadowsocks-2022" "Trojan（TLS）" "VMess-WS" "ShadowTLS v3")
   local L=abcdefghij i n sel="" tok idx
   for i in "${!all[@]}"; do
     if on "${all[$i]}"; then tok="[✓]"; else tok="[ ]"; fi
@@ -616,7 +678,8 @@ menu() {
  5. 设置固定隧道       6. 改回临时隧道
  7. 选择协议           8. 重启
  9. 更新内核           10. 卸载
-11. 节点 IPv4/IPv6     0. 退出
+11. 节点 IPv4/IPv6     12. Argo 协议
+ 0. 退出
 EOF
     case "$(ask "请选择" "")" in
       1) do_install ;;
@@ -630,6 +693,9 @@ EOF
       9) do_update ;;
       10) [ "$(ask "确认卸载？输入 y" "")" = y ] && do_uninstall ;;
       11) ip_menu ;;
+      12) case "$(ask "Argo 协议：1 vless  2 vmess  3 trojan" "")" in
+            1) do_set ARGO_PROTO=vless ;; 2) do_set ARGO_PROTO=vmess ;; 3) do_set ARGO_PROTO=trojan ;;
+          esac ;;
       0) exit 0 ;;
       *) warn "无效选项" ;;
     esac
