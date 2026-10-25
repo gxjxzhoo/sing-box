@@ -25,7 +25,7 @@
 set -o pipefail
 export LANG=en_US.UTF-8
 
-SCRIPT_VERSION="3.0.0"
+SCRIPT_VERSION="3.0.1"
 DIR=/etc/sing-box
 ENV_FILE=$DIR/sb.env
 CONF=$DIR/config.json
@@ -421,6 +421,8 @@ install_self() {
     curl -fsSL -m 30 -o "$SELF.part" "$SCRIPT_URL" && chmod 700 "$SELF.part" && mv -f "$SELF.part" "$SELF" \
       || warn "未能保存 sb 快捷命令，可手动下载脚本运行"
   fi
+  # 旧版脚本留下的 /usr/bin/sb 软链会指向已删除的文件，统一指向本地副本
+  [ -f "$SELF" ] && ln -sf "$SELF" /usr/bin/sb
 }
 
 do_set() { # KEY=VAL ...
@@ -465,6 +467,7 @@ do_status() {
 do_uninstall() {
   need_root; detect_init
   remove_service sb-argo; remove_service sing-box
+  [ "$(readlink /usr/bin/sb 2>/dev/null)" = "$SELF" ] && rm -f /usr/bin/sb
   rm -rf "$DIR" "$SELF"
   info "已卸载（防火墙规则如有需要请手动删除）"
 }
