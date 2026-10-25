@@ -315,6 +315,7 @@
           $("sniBox").hidden = !has("reality");
 
           // protocols
+          $("allBtn").textContent = sel.length === P.length ? "取消全选" : "全选";
           $("protoErr").textContent = sel.length ? "" : "请至少选择一个协议";
           if (!sel.length) ok = false;
 
@@ -398,7 +399,11 @@
 
         form.addEventListener("input", update);
         form.addEventListener("change", update);
-        $("allBtn").onclick = function () { P.forEach(function (p) { p.cb.checked = true; }); update(); };
+        $("allBtn").onclick = function () {
+          var all = P.every(function (p) { return p.cb.checked; });
+          P.forEach(function (p) { p.cb.checked = !all; });
+          update();
+        };
         $("defBtn").onclick = function () { P.forEach(function (p) { p.cb.checked = DEF.indexOf(p.k) > -1; }); update(); };
         $("uuidBtn").onclick = function () { $("uuid").value = uuid(); update(); };
         $("portBtn").onclick = function () { $("port").value = rport(); update(); };
