@@ -14,7 +14,7 @@
 #   PORT        直连起始端口（Hy2=PORT，Reality=+1，TUIC=+2，Trojan=+3，VMess=+4，SS=+5，AnyTLS=+6，ShadowTLS=+7，Socks5=+8；默认随机）
 #   HY2_PORT/REALITY_PORT/TUIC_PORT/TROJAN_PORT/VMESS_PORT/SS_PORT/ANYTLS_PORT/SHADOWTLS_PORT/SOCKS_PORT  单独指定某协议端口（留空=按 PORT 推算）
 #   PROTOCOLS   要启用的协议，逗号分隔，默认 argo,hy2,reality；可加 tuic,trojan,vmess,ss,anytls,shadowtls,socks
-#   ARGO_PROTO  Argo 隧道协议，可多选：默认 vless,vmess,trojan（Nginx 只听 127.0.0.1:ARGO_PORT 按路径分流，订阅同端口）
+#   Argo        同时输出 vless/vmess/trojan 三个节点；本地 Nginx 只听 127.0.0.1:ARGO_PORT 按路径分流，订阅同端口
 #   UUID        默认随机
 #   SNI         Reality 偷取的站点，默认 www.iij.ad.jp
 #   ARGO_PORT   Argo 本地端口（只监听 127.0.0.1），默认 8001（被占用则随机）
@@ -31,7 +31,7 @@
 set -o pipefail
 export LANG=en_US.UTF-8
 
-SCRIPT_VERSION="3.9.2"
+SCRIPT_VERSION="3.9.3"
 DIR=/etc/sing-box
 ENV_FILE=$DIR/sb.env
 CONF=$DIR/config.json
@@ -157,7 +157,7 @@ save_env() {
   {
     echo "PORT_LAYOUT=2"
     for k in UUID PORT $PORT_KEYS PROTOCOLS IP_MODE SNI ARGO_PORT ARGO_TOKEN ARGO_DOMAIN CFIP CFPORT NAME TUNE CERT_CUSTOM \
-             REALITY_PRIVATE REALITY_PUBLIC REALITY_SID SS_PASSWORD STLS_INNER_PORT ARGO_PROTO ARGO_IN_PORT SUB SUB_TOKEN SUB_PORT SB_VERSION; do
+             REALITY_PRIVATE REALITY_PUBLIC REALITY_SID SS_PASSWORD STLS_INNER_PORT ARGO_IN_PORT SUB SUB_TOKEN SUB_PORT SB_VERSION; do
       printf '%s=%q\n' "$k" "${!k:-}"
     done
   } > "$ENV_FILE"
@@ -310,7 +310,6 @@ ensure_keys() {
 }
 
 # Argo 隧道协议（可多选）：协议 → WS 路径 / 内部端口偏移
-aproto_on() { return 0; }  # Argo 的 vless/vmess/trojan 三个节点总是全部输出
 apath() { case "$1" in vless) echo /argo ;; vmess) echo /argo-vm ;; trojan) echo /argo-tr ;; esac; }
 aport() { case "$1" in vless) echo "$ARGO_IN_PORT" ;; vmess) echo $((ARGO_IN_PORT + 1)) ;; trojan) echo $((ARGO_IN_PORT + 2)) ;; esac; }
 
@@ -372,7 +371,6 @@ build_config() {
   if on argo; then  # 各 Argo 协议只听 127.0.0.1 内部端口，由 Nginx（127.0.0.1:ARGO_PORT）按路径分流
     local ap au
     for ap in vless vmess trojan; do
-      aproto_on "$ap" || continue
       case "$ap" in vmess) au='[{uuid:$u, alterId:0}]' ;; trojan) au='[{password:$u}]' ;; *) au='[{uuid:$u}]' ;; esac
       inb=$(jq --argjson p "$(aport "$ap")" --arg u "$UUID" --arg ty "$ap" --arg pa "$(apath "$ap")" ". + [{
           type:\$ty, tag:(\"argo-\"+\$ty), listen:\"127.0.0.1\", listen_port:\$p, users:$au,
@@ -472,7 +470,6 @@ setup_nginx() {
   mkdir -p "$DIR/nginx"
   local ap loc=""
   for ap in vless vmess trojan; do
-    aproto_on "$ap" || continue
     loc+="    location = $(apath "$ap") { proxy_pass http://127.0.0.1:$(aport "$ap"); proxy_http_version 1.1; proxy_set_header Upgrade \$http_upgrade; proxy_set_header Connection \"upgrade\"; proxy_set_header Host \$host; proxy_read_timeout 1d; proxy_send_timeout 1d; proxy_buffering off; }
 "
   done
@@ -506,7 +503,7 @@ EOF
   svc restart sb-nginx
 }
 
-svc_sig() { cat "/etc/systemd/system/$1.service" "/etc/init.d/$1" "$DIR/argo.env" "$DIR/argo.yml" 2>/dev/null | cksum; }
+svc_sig() { cat "/etc/systemd/system/$1.service" "/etc/init.d/$1" "$DIR/argo.env" 2>/dev/null | cksum; }
 
 setup_argo_service() {
   if ! on argo; then remove_service sb-argo 2>/dev/null; remove_service sb-nginx 2>/dev/null; rm -f "$DIR/argo.env" "$DIR/argo.yml" "$DIR/nginx.conf"; return; fi
@@ -520,7 +517,7 @@ setup_argo_service() {
     write_service sb-argo "Cloudflare Tunnel (sing-box)" "$cmd run" "$DIR/argo.env"
   else
     rm -f "$DIR/argo.env"
-    rm -f "$DIR/argo.yml"
+    rm -f "$DIR/argo.yml"  # 旧版遗留
     # 临时隧道每次启动（含开机）域名都会变：启动后自动刷新节点和订阅内容
     write_service sb-argo "Cloudflare Tunnel (sing-box)" "$cmd --url http://127.0.0.1:$ARGO_PORT" "" "sleep 5; $SELF nodes"
   fi
@@ -606,9 +603,9 @@ show_nodes() {
     if on argo; then
       host=$(argo_domain)
       if [ -n "$host" ]; then
-        aproto_on vless  && echo "vless://$UUID@$CFIP:$CFPORT?encryption=none&security=tls&sni=$host&fp=chrome&type=ws&host=$host&path=%2Fargo%3Fed%3D2560#$n-argo-vless"
-        aproto_on vmess  && echo "vmess://$(vmess_b64 "${NAME}-argo-vmess" "$CFIP" "$CFPORT" "$host" "/argo-vm?ed=2560" tls)"
-        aproto_on trojan && echo "trojan://$UUID@$CFIP:$CFPORT?security=tls&sni=$host&fp=chrome&type=ws&host=$host&path=%2Fargo-tr%3Fed%3D2560#$n-argo-trojan"
+        echo "vless://$UUID@$CFIP:$CFPORT?encryption=none&security=tls&sni=$host&fp=chrome&type=ws&host=$host&path=%2Fargo%3Fed%3D2560#$n-argo-vless"
+        echo "vmess://$(vmess_b64 "${NAME}-argo-vmess" "$CFIP" "$CFPORT" "$host" "/argo-vm?ed=2560" tls)"
+        echo "trojan://$UUID@$CFIP:$CFPORT?security=tls&sni=$host&fp=chrome&type=ws&host=$host&path=%2Fargo-tr%3Fed%3D2560#$n-argo-trojan"
       else
         warn "未获取到 Argo 域名，稍后执行 sb nodes 再试" >&2
       fi
@@ -673,7 +670,7 @@ do_install() {
   if [ -f "$ENV_FILE" ]; then
     warn "检测到已安装，将保留现有设置重新安装（命令行传入的变量优先）"
     local k ov=()
-    for k in UUID PORT $PORT_KEYS PROTOCOLS IP_MODE ARGO_PROTO SUB SNI ARGO_PORT ARGO_TOKEN ARGO_DOMAIN CFIP CFPORT NAME SB_VERSION TUNE CERT_B64 KEY_B64; do
+    for k in UUID PORT $PORT_KEYS PROTOCOLS IP_MODE SUB SNI ARGO_PORT ARGO_TOKEN ARGO_DOMAIN CFIP CFPORT NAME SB_VERSION TUNE CERT_B64 KEY_B64; do
       [ -n "${!k+x}" ] && ov+=("$k=${!k}")
     done
     load_env
@@ -714,7 +711,6 @@ do_install() {
   # Argo 本地端口默认 8001（与旧版 sb 一致，CF 后台填过的路由不用改；只听 127.0.0.1），被占用才随机
   if [ -z "${ARGO_PORT:-}" ]; then if port_free 8001; then ARGO_PORT=8001; else ARGO_PORT=$(rand_port); fi; fi
   check_ports
-  ARGO_PROTO=${ARGO_PROTO:-vless,vmess,trojan}
   if on argo && [ -z "${ARGO_TOKEN:-}" ] && [ -t 0 ] && [ ! -f "$ENV_FILE" ]; then
     ARGO_TOKEN=$(ask "Argo 固定隧道 Token（回车用临时隧道）" "")
     [ -n "$ARGO_TOKEN" ] && ARGO_DOMAIN=$(ask "固定隧道域名" "${ARGO_DOMAIN:-}")
@@ -751,7 +747,6 @@ do_set() { # KEY=VAL ...
     case "$k" in IP_MODE|NAME|CFIP|CFPORT) ;; *) only_view=0 ;; esac
     case "$k" in
       PROTOCOLS) for p in ${v//,/ }; do [[ ",$ALL_PROTOCOLS," == *",$p,"* ]] || die "未知协议：$p"; done; PROTOCOLS=$v ;;
-      ARGO_PROTO) v=${v// /}; [[ "$v" =~ ^(vless|vmess|trojan)(,(vless|vmess|trojan))*$ ]] || die "ARGO_PROTO 只能是 vless/vmess/trojan 的组合（逗号分隔）"; ARGO_PROTO=$v ;;
       SUB) case "$v" in 0|1) SUB=$v ;; *) die "SUB 只能是 0 或 1" ;; esac ;;
       CERT_B64|KEY_B64) printf -v "$k" '%s' "$v" ;;
       CERT) [ "$v" = fixed ] || die "CERT 只能设为 fixed（改回固定证书）"; CERT_CUSTOM=0 ;;
