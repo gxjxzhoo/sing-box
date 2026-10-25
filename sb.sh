@@ -31,7 +31,7 @@
 set -o pipefail
 export LANG=en_US.UTF-8
 
-SCRIPT_VERSION="3.8.1"
+SCRIPT_VERSION="3.8.2"
 DIR=/etc/sing-box
 ENV_FILE=$DIR/sb.env
 CONF=$DIR/config.json
@@ -508,6 +508,17 @@ argo_domain() {
   done
 }
 
+argo_check() { # 固定隧道自检：经 CF 访问 /argo，sing-box 正常会回 400（缺 WebSocket 握手）
+  local code; code=$(curl -s -o /dev/null -m 10 -w '%{http_code}' "https://$ARGO_DOMAIN/argo" 2>/dev/null)
+  case "$code" in
+    400|101) info "固定隧道自检：通（$ARGO_DOMAIN → 本机 $ARGO_PORT）" ;;
+    502|503|530) err "固定隧道自检：CF 连不上本机服务（HTTP $code）。检查 CF 路由端口是否为 $ARGO_PORT、类型是否 HTTP，或执行 sb set ARGO_PORT=CF里填的端口" ;;
+    404) err "固定隧道自检：HTTP 404，CF 路由的路径不对（应留空）或域名没绑到这条隧道" ;;
+    000|"") warn "固定隧道自检：访问 https://$ARGO_DOMAIN 超时/失败（本机可能访问不了 CF，或域名未解析）" ;;
+    *) warn "固定隧道自检：HTTP $code，请检查 CF 路由" ;;
+  esac
+}
+
 urlenc() { jq -rn --arg s "$1" '$s|@uri'; }
 b64() { printf '%s' "$1" | base64 -w0 2>/dev/null || printf '%s' "$1" | base64 | tr -d '\n'; }
 vmess_b64() { # 名称 地址 端口 host path tls
@@ -558,11 +569,14 @@ show_nodes() {
   base64 -w0 "$NODES" 2>/dev/null || base64 "$NODES" | tr -d '\n'; echo
   { on hy2 || on tuic || on anytls || on trojan; } && warn "Hy2/TUIC/AnyTLS/Trojan 用自签证书，客户端需开启“跳过证书验证”"
   on shadowtls && warn "ShadowTLS 链接为 Shadowrocket 格式；其他客户端手填：SS-2022 aes-128-gcm + ShadowTLS v3，SNI www.bing.com，密码=UUID"
-  [ -n "${ARGO_TOKEN:-}" ] && on argo && warn "固定隧道：请在 Cloudflare 把 $ARGO_DOMAIN 指向 http://localhost:$ARGO_PORT"
+  if [ -n "${ARGO_TOKEN:-}" ] && on argo; then
+    warn "固定隧道：Cloudflare 里 $ARGO_DOMAIN 的服务须为 HTTP → 127.0.0.1:$ARGO_PORT（路径留空）"
+    argo_check
+  fi
   if sub_on && [ -n "${host:-}" ]; then
     info "订阅链接（Base64，只经 Argo 域名访问；明文把 sub 换成 raw）："
     echo "https://$host/ui/$SUB_TOKEN/sub"
-    [ -n "${ARGO_TOKEN:-}" ] && warn "固定隧道需在 Cloudflare 同域名再加一条路由：路径 ^/ui/$SUB_TOKEN/ → http://localhost:$SUB_PORT，并排在无路径那条之前"
+    [ -n "${ARGO_TOKEN:-}" ] && warn "固定隧道需在 Cloudflare 同域名再加一条路由：路径 ^/ui/$SUB_TOKEN/ → http://127.0.0.1:$SUB_PORT，并排在无路径那条之前"
     [ -z "${ARGO_TOKEN:-}" ] && warn "临时隧道重启后域名会变，订阅链接随之变化；执行 sb nodes 查看新链接"
   fi
   return 0
@@ -643,7 +657,8 @@ do_install() {
   fi
   PORT=${PORT:-$(rand_base)}
   valid_port "$PORT" || die "端口无效：$PORT"
-  ARGO_PORT=${ARGO_PORT:-$(rand_port)}
+  # Argo 本地端口默认 8001（与旧版 sb 一致，CF 后台填过的路由不用改；只听 127.0.0.1），被占用才随机
+  if [ -z "${ARGO_PORT:-}" ]; then if port_free 8001; then ARGO_PORT=8001; else ARGO_PORT=$(rand_port); fi; fi
   check_ports
   if on argo && [ -z "${ARGO_PROTO:-}" ] && [ -t 0 ] && [ ! -f "$ENV_FILE" ]; then
     echo "Argo 隧道协议：" >&2; printf '  %s\n' "1. vless（默认）" "2. vmess" "3. trojan" >&2
