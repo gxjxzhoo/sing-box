@@ -30,7 +30,7 @@
 set -o pipefail
 export LANG=en_US.UTF-8
 
-SCRIPT_VERSION="3.7.0"
+SCRIPT_VERSION="3.7.1"
 DIR=/etc/sing-box
 ENV_FILE=$DIR/sb.env
 CONF=$DIR/config.json
@@ -226,7 +226,24 @@ install_cloudflared() {
 }
 
 # ---------- 证书与密钥 ----------
+same_keypair() { # 证书与私钥是否配对
+  [ "$(openssl x509 -noout -pubkey -in "$1" 2>/dev/null | openssl sha256)" = "$(openssl pkey -pubout -in "$2" 2>/dev/null | openssl sha256)" ]
+}
+
+migrate_old() { # 旧版 sb（sb/ 目录）留下的证书与 Reality 密钥：配对则沿用，客户端不用改
+  if [ ! -s "$DIR/key.pem" ] && [ -s "$DIR/private.key" ] && [ -s "$DIR/cert.pem" ] && same_keypair "$DIR/cert.pem" "$DIR/private.key"; then
+    install -m 600 "$DIR/private.key" "$DIR/key.pem" && info "沿用旧版证书（cert.pem + private.key）"
+  fi
+  if [ -z "${REALITY_PRIVATE:-}" ] && [ -s "$DIR/reality.keys" ]; then
+    REALITY_PRIVATE=$(sed -n 's/^PRIVATE_KEY=//p' "$DIR/reality.keys" | head -1)
+    REALITY_PUBLIC=$(sed -n 's/^PUBLIC_KEY=//p' "$DIR/reality.keys" | head -1)
+    [ -n "$REALITY_PRIVATE" ] && [ -n "$REALITY_PUBLIC" ] && info "沿用旧版 Reality 密钥" || { REALITY_PRIVATE=""; REALITY_PUBLIC=""; }
+  fi
+  return 0
+}
+
 ensure_keys() {
+  migrate_old
   if [ ! -s "$DIR/cert.pem" ] || [ ! -s "$DIR/key.pem" ]; then
     openssl ecparam -genkey -name prime256v1 -out "$DIR/key.pem" 2>/dev/null
     openssl req -new -x509 -days 3650 -key "$DIR/key.pem" -out "$DIR/cert.pem" -subj "/CN=bing.com" 2>/dev/null
