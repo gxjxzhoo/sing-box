@@ -27,7 +27,7 @@
 set -o pipefail
 export LANG=en_US.UTF-8
 
-SCRIPT_VERSION="3.3.2"
+SCRIPT_VERSION="3.4.0"
 DIR=/etc/sing-box
 ENV_FILE=$DIR/sb.env
 CONF=$DIR/config.json
@@ -440,6 +440,10 @@ do_install() {
   fi
   mkdir -p "$DIR"; chmod 700 "$DIR"
 
+  if [ -z "${PROTOCOLS:-}" ] && [ -t 0 ]; then
+    PROTOCOLS=$DEFAULT_PROTOCOLS
+    PROTOCOLS=$(pick_protocols "默认 abcde") || exit 1
+  fi
   PROTOCOLS=${PROTOCOLS:-$DEFAULT_PROTOCOLS}
   UUID=${UUID:-$(cat /proc/sys/kernel/random/uuid)}
   valid_uuid "$UUID" || die "UUID 格式不对：$UUID"
@@ -548,18 +552,30 @@ port_menu() {
   esac
 }
 
-proto_menu() {
-  local all=(${ALL_PROTOCOLS//,/ }) i sel="" n
+# 协议选择：字母 a-f（也接受数字 1-6），可连写 abce 或用空格/逗号分隔；输出逗号列表，回车输出空
+pick_protocols() {
+  local all=(${ALL_PROTOCOLS//,/ }) desc=("VLESS-Reality" "Hysteria2" "TUIC v5" "AnyTLS" "Argo 隧道（VLESS-WS）" "Socks5")
+  local L=abcdefghij i n sel="" tok idx
   for i in "${!all[@]}"; do
-    if on "${all[$i]}"; then echo "  $((i + 1)). [✓] ${all[$i]}"; else echo "  $((i + 1)). [ ] ${all[$i]}"; fi
+    if on "${all[$i]}"; then tok="[✓]"; else tok="[ ]"; fi
+    printf '  %s. %s %s\n' "${L:$i:1}" "$tok" "${desc[$i]}" >&2
   done
-  n=$(ask "输入要启用的编号（如 1 2 3 5，回车不变）" "")
-  [ -n "$n" ] || return
-  for i in ${n//,/ }; do
-    [[ "$i" =~ ^[0-9]+$ ]] && [ "$i" -ge 1 ] && [ "$i" -le ${#all[@]} ] || { warn "无效编号：$i"; return; }
-    [[ ",$sel," == *",${all[$((i - 1))]},"* ]] || sel+="${sel:+,}${all[$((i - 1))]}"
+  n=$(ask "输入要启用的协议（如 abce，回车=${1:-不变}）" "")
+  [ -n "$n" ] || return 0
+  n=$(tr 'A-Z,' 'a-z ' <<<"$n")
+  if [[ "$n" =~ [0-9] ]]; then n=${n//[^0-9 ]/}; else n=$(sed 's/[^a-z]//g; s/./& /g' <<<"$n"); fi
+  for tok in $n; do
+    if [[ "$tok" =~ ^[0-9]+$ ]]; then idx=$((tok - 1)); else idx=${L%%"$tok"*}; idx=${#idx}; fi
+    [ "$idx" -ge 0 ] && [ "$idx" -lt ${#all[@]} ] || { err "无效选项：$tok"; return 1; }
+    [[ ",$sel," == *",${all[$idx]},"* ]] || sel+="${sel:+,}${all[$idx]}"
   done
-  do_set "PROTOCOLS=$sel"
+  echo "$sel"
+}
+
+proto_menu() {
+  local sel
+  sel=$(pick_protocols) || return
+  [ -n "$sel" ] && do_set "PROTOCOLS=$sel"
 }
 
 ip_menu() {
