@@ -25,12 +25,13 @@
 #   NAME        节点名前缀，默认主机名
 #   IP_MODE     节点用哪个 IP：auto（优先 v4）/4/6/both，默认 auto
 #   SB_VERSION  固定 sing-box 版本（需 ≥1.12，如 1.12.9），默认最新正式版
+#   CERT_B64/KEY_B64  自定义证书和私钥（base64 编码的 PEM，需配对）；不填用内置固定证书（CN=bing.com）
 #   TUNE        1 开启 BBR+fq 与 UDP 缓冲调优（默认）/0 不改内核参数
 # Alpine 需先 apk add bash curl
 set -o pipefail
 export LANG=en_US.UTF-8
 
-SCRIPT_VERSION="3.7.8"
+SCRIPT_VERSION="3.8.0"
 DIR=/etc/sing-box
 ENV_FILE=$DIR/sb.env
 CONF=$DIR/config.json
@@ -142,7 +143,7 @@ save_env() {
   local k
   umask 077
   {
-    for k in UUID PORT $PORT_KEYS PROTOCOLS IP_MODE SNI ARGO_PORT ARGO_TOKEN ARGO_DOMAIN CFIP CFPORT NAME TUNE \
+    for k in UUID PORT $PORT_KEYS PROTOCOLS IP_MODE SNI ARGO_PORT ARGO_TOKEN ARGO_DOMAIN CFIP CFPORT NAME TUNE CERT_CUSTOM \
              REALITY_PRIVATE REALITY_PUBLIC REALITY_SID SS_PASSWORD STLS_INNER_PORT ARGO_PROTO SUB SUB_TOKEN SUB_PORT SB_VERSION; do
       printf '%s=%q\n' "$k" "${!k:-}"
     done
@@ -227,13 +228,12 @@ install_cloudflared() {
 
 # ---------- 证书与密钥 ----------
 same_keypair() { # 证书与私钥是否配对
-  [ "$(openssl x509 -noout -pubkey -in "$1" 2>/dev/null | openssl sha256)" = "$(openssl pkey -pubout -in "$2" 2>/dev/null | openssl sha256)" ]
+  local a b
+  a=$(openssl x509 -noout -pubkey -in "$1" 2>/dev/null); b=$(openssl pkey -pubout -in "$2" 2>/dev/null)
+  [ -n "$a" ] && [ "$a" = "$b" ]
 }
 
-migrate_old() { # 旧版 sb（sb/ 目录）留下的证书与 Reality 密钥：配对则沿用，客户端不用改
-  if [ ! -s "$DIR/key.pem" ] && [ -s "$DIR/private.key" ] && [ -s "$DIR/cert.pem" ] && same_keypair "$DIR/cert.pem" "$DIR/private.key"; then
-    install -m 600 "$DIR/private.key" "$DIR/key.pem" && info "沿用旧版证书（cert.pem + private.key）"
-  fi
+migrate_old() { # 旧版 sb（sb/ 目录）留下的 Reality 密钥：沿用，客户端不用改
   if [ -z "${REALITY_PRIVATE:-}" ] && [ -s "$DIR/reality.keys" ]; then
     REALITY_PRIVATE=$(sed -n 's/^PRIVATE_KEY=//p' "$DIR/reality.keys" | head -1)
     REALITY_PUBLIC=$(sed -n 's/^PUBLIC_KEY=//p' "$DIR/reality.keys" | head -1)
@@ -242,13 +242,46 @@ migrate_old() { # 旧版 sb（sb/ 目录）留下的证书与 Reality 密钥：�
   return 0
 }
 
+# 固定自签证书（CN=bing.com，到期 2035-09-16，与旧版 sb 同一张）：重装后指纹不变，客户端 pinSHA256 不用改
+FIXED_KEY='-----BEGIN EC PARAMETERS-----
+BggqhkjOPQMBBw==
+-----END EC PARAMETERS-----
+-----BEGIN EC PRIVATE KEY-----
+MHcCAQEEIM4792SEtPqIt1ywqTd/0bYidBqpYV/++siNnfBYsdUYoAoGCCqGSM49
+AwEHoUQDQgAE1kHafPj07rJG+HboH2ekAI4r+e6TL38GWASANnngZreoQDF16ARa
+/TsyLyFoPkhLxSbehH/NBEjHtSZGaDhMqQ==
+-----END EC PRIVATE KEY-----
+'
+FIXED_CERT='-----BEGIN CERTIFICATE-----
+MIIBejCCASGgAwIBAgIUfWeQL3556PNJLp/veCFxGNj9crkwCgYIKoZIzj0EAwIw
+EzERMA8GA1UEAwwIYmluZy5jb20wHhcNMjUwOTE4MTgyMDIyWhcNMzUwOTE2MTgy
+MDIyWjATMREwDwYDVQQDDAhiaW5nLmNvbTBZMBMGByqGSM49AgEGCCqGSM49AwEH
+A0IABNZB2nz49O6yRvh26B9npACOK/nuky9/BlgEgDZ54Ga3qEAxdegEWv07Mi8h
+aD5IS8Um3oR/zQRIx7UmRmg4TKmjUzBRMB0GA1UdDgQWBBTV1cFID7UISE7PLTBR
+BfGbgkrMNzAfBgNVHSMEGDAWgBTV1cFID7UISE7PLTBRBfGbgkrMNzAPBgNVHRMB
+Af8EBTADAQH/MAoGCCqGSM49BAMCA0cAMEQCIAIDAJvg0vd/ytrQVvEcSm6XTlB+
+eQ6OFb9LbLYL9f+sAiAffoMbi4y/0YUSlTtz7as9S8/lciBF5VCUoVIKS+vX2g==
+-----END CERTIFICATE-----
+'
+
+ensure_cert() { # CERT_B64/KEY_B64（base64 的 PEM，如 Cloudflare Origin 证书）优先，否则用固定证书
+  if [ -n "${CERT_B64:-}" ] && [ -n "${KEY_B64:-}" ]; then
+    local t; t=$(mktemp -d)
+    base64 -d <<<"$CERT_B64" > "$t/c" 2>/dev/null; base64 -d <<<"$KEY_B64" > "$t/k" 2>/dev/null
+    if same_keypair "$t/c" "$t/k"; then
+      install -m 644 "$t/c" "$DIR/cert.pem"; install -m 600 "$t/k" "$DIR/key.pem"; CERT_CUSTOM=1; info "使用自定义证书"
+    else warn "CERT_B64/KEY_B64 无效或不配对，改用固定证书"; CERT_CUSTOM=0; fi
+    rm -rf "$t"; unset CERT_B64 KEY_B64
+  fi
+  if [ "${CERT_CUSTOM:-0}" = 1 ] && [ -s "$DIR/cert.pem" ] && [ -s "$DIR/key.pem" ]; then return 0; fi
+  CERT_CUSTOM=0
+  printf '%s' "$FIXED_CERT" > "$DIR/cert.pem"
+  ( umask 077; printf '%s' "$FIXED_KEY" > "$DIR/key.pem" )
+}
+
 ensure_keys() {
   migrate_old
-  if [ ! -s "$DIR/cert.pem" ] || [ ! -s "$DIR/key.pem" ]; then
-    openssl ecparam -genkey -name prime256v1 -out "$DIR/key.pem" 2>/dev/null
-    openssl req -new -x509 -days 3650 -key "$DIR/key.pem" -out "$DIR/cert.pem" -subj "/CN=bing.com" 2>/dev/null
-    chmod 600 "$DIR/key.pem"
-  fi
+  ensure_cert
   if [ -z "${REALITY_PRIVATE:-}" ] || [ -z "${REALITY_PUBLIC:-}" ]; then
     local out
     out=$("$BIN_SB" generate reality-keypair) || die "生成 Reality 密钥失败"
@@ -572,7 +605,7 @@ do_install() {
   if [ -f "$ENV_FILE" ]; then
     warn "检测到已安装，将保留现有设置重新安装（命令行传入的变量优先）"
     local k ov=()
-    for k in UUID PORT $PORT_KEYS PROTOCOLS IP_MODE ARGO_PROTO SUB SNI ARGO_PORT ARGO_TOKEN ARGO_DOMAIN CFIP CFPORT NAME SB_VERSION TUNE; do
+    for k in UUID PORT $PORT_KEYS PROTOCOLS IP_MODE ARGO_PROTO SUB SNI ARGO_PORT ARGO_TOKEN ARGO_DOMAIN CFIP CFPORT NAME SB_VERSION TUNE CERT_B64 KEY_B64; do
       [ -n "${!k+x}" ] && ov+=("$k=${!k}")
     done
     load_env
@@ -657,6 +690,8 @@ do_set() { # KEY=VAL ...
       PROTOCOLS) for p in ${v//,/ }; do [[ ",$ALL_PROTOCOLS," == *",$p,"* ]] || die "未知协议：$p"; done; PROTOCOLS=$v ;;
       ARGO_PROTO) case "$v" in vless|vmess|trojan) ARGO_PROTO=$v ;; *) die "ARGO_PROTO 只能是 vless/vmess/trojan" ;; esac ;;
       SUB) case "$v" in 0|1) SUB=$v ;; *) die "SUB 只能是 0 或 1" ;; esac ;;
+      CERT_B64|KEY_B64) printf -v "$k" '%s' "$v" ;;
+      CERT) [ "$v" = fixed ] || die "CERT 只能设为 fixed（改回固定证书）"; CERT_CUSTOM=0 ;;
       TUNE) case "$v" in 0|1) TUNE=$v; rm -f "$SYSCTL_FILE" ;; *) die "TUNE 只能是 0 或 1" ;; esac ;;
       SUB_TOKEN) [ -n "$v" ] || v=$(openssl rand -hex 12); [[ "$v" =~ ^[A-Za-z0-9_-]{8,64}$ ]] || die "SUB_TOKEN 需 8-64 位字母数字"; rm -rf "$DIR/sub"; SUB_TOKEN=$v ;;
       IP_MODE) case "$v" in auto|4|6|both) IP_MODE=$v ;; *) die "IP_MODE 只能是 auto/4/6/both" ;; esac ;;
