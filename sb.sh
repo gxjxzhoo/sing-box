@@ -7,11 +7,12 @@
 #   bash sb.sh              交互菜单
 #   bash sb.sh install      安装（可用环境变量免交互，见下）
 #   bash sb.sh nodes        查看节点
-#   bash sb.sh set KEY=VAL  修改设置并重建（如 UUID=... PORT=... ARGO_TOKEN=...）
+#   bash sb.sh set KEY=VAL  修改设置并重建（如 UUID=... PORT=... HY2_PORT=... ARGO_TOKEN=...）
 #   bash sb.sh restart|status|update|uninstall
 #
 # 安装时可用的环境变量：
 #   PORT        直连起始端口（Reality=PORT，Hy2=+1，TUIC=+2，AnyTLS=+3，Socks5=+4；默认随机）
+#   REALITY_PORT/HY2_PORT/TUIC_PORT/ANYTLS_PORT/SOCKS_PORT  单独指定某协议端口（留空=按 PORT 推算）
 #   PROTOCOLS   要启用的协议，逗号分隔，默认 reality,hy2,tuic,anytls,argo；可加 socks
 #   UUID        默认随机
 #   SNI         Reality 偷取的站点，默认 www.iij.ad.jp
@@ -25,7 +26,7 @@
 set -o pipefail
 export LANG=en_US.UTF-8
 
-SCRIPT_VERSION="3.1.0"
+SCRIPT_VERSION="3.2.0"
 DIR=/etc/sing-box
 ENV_FILE=$DIR/sb.env
 CONF=$DIR/config.json
@@ -118,7 +119,7 @@ save_env() {
   local k
   umask 077
   {
-    for k in UUID PORT PROTOCOLS SNI ARGO_PORT ARGO_TOKEN ARGO_DOMAIN CFIP CFPORT NAME \
+    for k in UUID PORT $PORT_KEYS PROTOCOLS SNI ARGO_PORT ARGO_TOKEN ARGO_DOMAIN CFIP CFPORT NAME \
              REALITY_PRIVATE REALITY_PUBLIC REALITY_SID SB_VERSION; do
       printf '%s=%q\n' "$k" "${!k:-}"
     done
@@ -127,6 +128,29 @@ save_env() {
 }
 
 on() { [[ ",$PROTOCOLS," == *",$1,"* ]]; }
+
+# 各协议端口：单独设置优先，否则按 PORT 推算
+PORT_KEYS="REALITY_PORT HY2_PORT TUIC_PORT ANYTLS_PORT SOCKS_PORT"
+pt() {
+  case "$1" in
+    reality) echo "${REALITY_PORT:-$PORT}" ;;
+    hy2)     echo "${HY2_PORT:-$((PORT + 1))}" ;;
+    tuic)    echo "${TUIC_PORT:-$((PORT + 2))}" ;;
+    anytls)  echo "${ANYTLS_PORT:-$((PORT + 3))}" ;;
+    socks)   echo "${SOCKS_PORT:-$((PORT + 4))}" ;;
+  esac
+}
+
+check_ports() { # 已启用协议的端口必须合法且互不冲突
+  local seen=" $ARGO_PORT " x p
+  for x in reality hy2 tuic anytls socks; do
+    on "$x" || continue
+    p=$(pt "$x")
+    valid_port "$p" || die "$x 端口无效：$p"
+    [[ "$seen" == *" $p "* ]] && die "$x 端口 $p 与其他协议冲突"
+    seen+="$p "
+  done
+}
 
 # ---------- 下载（校验 GitHub 发布的 sha256）----------
 gh_asset() { # repo tag(可空=latest) 名称正则 → 输出 "url sha256 tag"
@@ -191,11 +215,12 @@ ensure_keys() {
 
 # ---------- 生成配置 ----------
 build_config() {
-  local hy2=$((PORT + 1)) tuic=$((PORT + 2)) anytls=$((PORT + 3)) socks=$((PORT + 4)) tls inb='[]'
+  local hy2 tuic anytls socks tls inb='[]'
+  hy2=$(pt hy2); tuic=$(pt tuic); anytls=$(pt anytls); socks=$(pt socks)
   tls=$(jq -n --arg c "$DIR/cert.pem" --arg k "$DIR/key.pem" \
         '{enabled:true, certificate_path:$c, key_path:$k}')
 
-  on reality && inb=$(jq --argjson p "$PORT" --arg u "$UUID" --arg sni "$SNI" \
+  on reality && inb=$(jq --argjson p "$(pt reality)" --arg u "$UUID" --arg sni "$SNI" \
       --arg pk "$REALITY_PRIVATE" --arg sid "$REALITY_SID" '. + [{
         type:"vless", tag:"reality", listen:"::", listen_port:$p,
         users:[{uuid:$u, flow:"xtls-rprx-vision"}],
@@ -320,11 +345,11 @@ setup_argo_service() {
 # ---------- 防火墙（仅在已启用时放行）----------
 open_ports() {
   local tcp=() udp=() p
-  on reality && tcp+=("$PORT")
-  on hy2 && udp+=("$((PORT + 1))")
-  on tuic && udp+=("$((PORT + 2))")
-  on anytls && tcp+=("$((PORT + 3))")
-  on socks && { tcp+=("$((PORT + 4))"); udp+=("$((PORT + 4))"); }
+  on reality && tcp+=("$(pt reality)")
+  on hy2 && udp+=("$(pt hy2)")
+  on tuic && udp+=("$(pt tuic)")
+  on anytls && tcp+=("$(pt anytls)")
+  on socks && { tcp+=("$(pt socks)"); udp+=("$(pt socks)"); }
   if has ufw && ufw status 2>/dev/null | grep -q active; then
     for p in "${tcp[@]}"; do ufw allow "$p/tcp" >/dev/null; done
     for p in "${udp[@]}"; do ufw allow "$p/udp" >/dev/null; done
@@ -353,11 +378,11 @@ show_nodes() {
   [ -f "$CONF" ] || die "尚未安装"
   local ip n host; ip=$(public_ip); n=$(urlenc "${NAME}")
   {
-    on reality && echo "vless://$UUID@$ip:$PORT?encryption=none&flow=xtls-rprx-vision&security=reality&sni=$SNI&fp=chrome&pbk=$REALITY_PUBLIC&sid=$REALITY_SID&type=tcp#$n-reality"
-    on hy2     && echo "hysteria2://$UUID@$ip:$((PORT + 1))?sni=www.bing.com&alpn=h3&insecure=1#$n-hy2"
-    on tuic    && echo "tuic://$UUID:$UUID@$ip:$((PORT + 2))?sni=www.bing.com&alpn=h3&congestion_control=bbr&udp_relay_mode=native&allow_insecure=1#$n-tuic"
-    on anytls  && echo "anytls://$UUID@$ip:$((PORT + 3))?sni=www.bing.com&insecure=1#$n-anytls"
-    on socks   && echo "socks5://${UUID%%-*}:$UUID@$ip:$((PORT + 4))#$n-socks5"
+    on reality && echo "vless://$UUID@$ip:$(pt reality)?encryption=none&flow=xtls-rprx-vision&security=reality&sni=$SNI&fp=chrome&pbk=$REALITY_PUBLIC&sid=$REALITY_SID&type=tcp#$n-reality"
+    on hy2     && echo "hysteria2://$UUID@$ip:$(pt hy2)?sni=www.bing.com&alpn=h3&insecure=1#$n-hy2"
+    on tuic    && echo "tuic://$UUID:$UUID@$ip:$(pt tuic)?sni=www.bing.com&alpn=h3&congestion_control=bbr&udp_relay_mode=native&allow_insecure=1#$n-tuic"
+    on anytls  && echo "anytls://$UUID@$ip:$(pt anytls)?sni=www.bing.com&insecure=1#$n-anytls"
+    on socks   && echo "socks5://${UUID%%-*}:$UUID@$ip:$(pt socks)#$n-socks5"
     if on argo; then
       host=$(argo_domain)
       if [ -n "$host" ]; then
@@ -404,11 +429,12 @@ do_install() {
   CFPORT=${CFPORT:-443}
   NAME=${NAME:-$(hostname | cut -c1-20)}
   if [ -z "${PORT:-}" ]; then
-    if [ -t 0 ]; then PORT=$(ask "直连起始端口（占用 5 个连续端口，回车随机）" ""); fi
+    if [ -t 0 ]; then PORT=$(ask "直连起始端口（默认占用 5 个连续端口，回车随机）" ""); fi
     PORT=${PORT:-$(rand_port)}
   fi
-  valid_port "$PORT" && [ "$PORT" -le 65531 ] || die "端口无效：$PORT"
+  valid_port "$PORT" || die "端口无效：$PORT"
   ARGO_PORT=${ARGO_PORT:-$(rand_port)}
+  check_ports
   if on argo && [ -n "${ARGO_TOKEN:-}" ] && [ -z "${ARGO_DOMAIN:-}" ]; then
     die "使用固定隧道 ARGO_TOKEN 时必须同时设置 ARGO_DOMAIN"
   fi
@@ -442,10 +468,12 @@ do_set() { # KEY=VAL ...
       PROTOCOLS) for p in ${v//,/ }; do [[ ",$ALL_PROTOCOLS," == *",$p,"* ]] || die "未知协议：$p"; done; PROTOCOLS=$v ;;
       UUID|SNI|CFIP|CFPORT|NAME|ARGO_DOMAIN|ARGO_TOKEN) printf -v "$k" '%s' "$v" ;;
       PORT|ARGO_PORT) valid_port "$v" || die "端口无效：$v"; printf -v "$k" '%s' "$v" ;;
+      REALITY_PORT|HY2_PORT|TUIC_PORT|ANYTLS_PORT|SOCKS_PORT)
+        [ -z "$v" ] || valid_port "$v" || die "端口无效：$v"; printf -v "$k" '%s' "$v" ;;
       *) die "不支持的设置：$k" ;;
     esac
   done
-  [ "$PORT" -le 65531 ] || die "起始端口最大 65531"
+  check_ports
   if on argo && [ -n "${ARGO_TOKEN:-}" ] && [ -z "${ARGO_DOMAIN:-}" ]; then die "固定隧道需要 ARGO_DOMAIN"; fi
   apply
   info "已更新"
@@ -480,6 +508,20 @@ do_uninstall() {
   info "已卸载（防火墙规则如有需要请手动删除）"
 }
 
+port_menu() {
+  local x k
+  for x in reality hy2 tuic anytls socks; do on "$x" && echo "  $x：$(pt "$x")"; done
+  echo "  输入 all 改起始端口（各协议顺延），或输入协议名单独改"
+  x=$(ask "要改哪个" "all")
+  case "$x" in
+    all) do_set "PORT=$(ask "新的起始端口" "${PORT:-}")" ;;
+    reality|hy2|tuic|anytls|socks)
+      k="$(tr a-z A-Z <<<"$x")_PORT"
+      do_set "$k=$(ask "$x 新端口（留空=恢复按起始端口推算）" "")" ;;
+    *) warn "无效选项" ;;
+  esac
+}
+
 menu() {
   load_env
   while true; do
@@ -497,7 +539,7 @@ EOF
     case "$(ask "请选择" "")" in
       1) do_install ;;
       2) show_nodes ;;
-      3) do_set "PORT=$(ask "新的直连起始端口" "${PORT:-}")" ;;
+      3) port_menu ;;
       4) do_set "UUID=$(cat /proc/sys/kernel/random/uuid)" ;;
       5) do_set "ARGO_TOKEN=$(ask "隧道 Token" "")" "ARGO_DOMAIN=$(ask "隧道域名" "${ARGO_DOMAIN:-}")" ;;
       6) do_set "ARGO_TOKEN=" "ARGO_DOMAIN=" ;;
