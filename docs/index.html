@@ -57,12 +57,9 @@
       .x-out { display: grid; gap: 16px; }
       .x-out__grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 260px), 1fr)); gap: 16px; }
       .x-code { margin: 0; padding: 14px 16px; border-radius: var(--r-s); background: var(--fill-primary-on); border: 1px solid var(--stroke-primary); font: 400 14px/1.5 "Geist Mono", ui-monospace, monospace; white-space: pre-wrap; word-break: break-all; overflow-wrap: anywhere; user-select: text; -webkit-user-select: text; }
-      .x-code { transition: border-color var(--dur-quick) var(--ease-out), box-shadow var(--dur-quick) var(--ease-out); }
-      .x-code.is-copying { border-color: var(--fill-system-green); box-shadow: 0 0 0 2px color-mix(in srgb, var(--fill-system-green) 30%, transparent); }
       .x-code.is-off { color: var(--text-secondary); font-family: var(--sans); }
       .x-warn { padding: 12px 14px; border-radius: var(--r-s); background: color-mix(in srgb, #ffc400 22%, var(--fill-primary-on)); border: 1px solid color-mix(in srgb, #ffc400 60%, transparent); font: var(--type-small); }
       .x-warn[hidden] { display: none; }
-      .x-copied { font: var(--type-tag); color: var(--fill-system-green); }
       .x-pw { position: relative; }
       button.btn { cursor: pointer; }
       button.btn:disabled { opacity: 0.45; cursor: not-allowed; }
@@ -211,7 +208,7 @@
             <div class="x-panel">
               <div class="x-panel__top">
                 <h3>安装命令</h3>
-                <div class="links"><span class="x-copied" aria-live="polite"></span><button type="button" class="btn" data-copy="cmd">复制</button></div>
+                <div class="links"><button type="button" class="btn" data-copy="cmd">复制</button></div>
               </div>
               <pre class="x-code" id="cmd"></pre>
               <p class="x-warn" id="tokWarn" hidden>命令含隧道 Token，会留在 shell 历史里；可在命令前加一个空格，或运行后执行 history -c</p>
@@ -221,7 +218,7 @@
               <div class="x-panel">
                 <div class="x-panel__top">
                   <h3>查看节点 / 订阅</h3>
-                  <div class="links"><span class="x-copied" aria-live="polite"></span><button type="button" class="btn" data-copy="c2">复制</button></div>
+                  <div class="links"><button type="button" class="btn" data-copy="c2">复制</button></div>
                 </div>
                 <pre class="x-code" id="c2">sb nodes</pre>
                 <p class="fineprint">安装完成后也会直接打印节点、Base64 和 Argo 订阅链接</p>
@@ -229,14 +226,14 @@
               <div class="x-panel">
                 <div class="x-panel__top">
                   <h3>管理菜单</h3>
-                  <div class="links"><span class="x-copied" aria-live="polite"></span><button type="button" class="btn" data-copy="c3">复制</button></div>
+                  <div class="links"><button type="button" class="btn" data-copy="c3">复制</button></div>
                 </div>
                 <pre class="x-code" id="c3">sb</pre>
               </div>
               <div class="x-panel">
                 <div class="x-panel__top">
                   <h3>卸载</h3>
-                  <div class="links"><span class="x-copied" aria-live="polite"></span><button type="button" class="btn" data-copy="c4">复制</button></div>
+                  <div class="links"><button type="button" class="btn" data-copy="c4">复制</button></div>
                 </div>
                 <pre class="x-code" id="c4">sb uninstall</pre>
               </div>
@@ -429,32 +426,21 @@
           return ok;
         }
         function flash(btn, msg) {
-          var s = btn.parentNode.querySelector(".x-copied");
-          s.textContent = msg;
-          s.style.color = msg === "已复制" ? "" : "var(--text-secondary)";
-          btn.textContent = msg === "已复制" ? "已复制 ✓" : "已选中";
-          btn.setAttribute("aria-label", msg);
+          btn.textContent = msg;
           clearTimeout(btn._t);
-          btn._t = setTimeout(function () { s.textContent = ""; btn.textContent = "复制"; btn.removeAttribute("aria-label"); }, msg === "已复制" ? 1800 : 4000);
+          btn._t = setTimeout(function () { btn.textContent = "复制"; }, msg === "已复制" ? 1500 : 4000);
         }
         document.querySelectorAll("[data-copy]").forEach(function (btn) {
           btn.addEventListener("click", function () {
             var el = $(btn.getAttribute("data-copy")), text = el.textContent;
-            btn.textContent = "复制中…";
-            el.classList.add("is-copying");
-            setTimeout(function () { el.classList.remove("is-copying"); }, 1200);
-            function fallback() {
-              if (execCopy(text)) flash(btn, "已复制");
-              else { selectEl(el); flash(btn, "已选中，请长按复制"); }
-            }
+            function fail() { selectEl(el); flash(btn, "长按复制"); }
+            if (execCopy(text)) { flash(btn, "已复制"); return; }
             try {
               if (navigator.clipboard && navigator.clipboard.writeText) {
-                var done = false;
-                var finish = function (f) { if (!done) { done = true; f(); } };
-                setTimeout(function () { finish(fallback); }, 800);
-                navigator.clipboard.writeText(text).then(function () { finish(function () { flash(btn, "已复制"); }); }, function () { finish(fallback); });
-              } else fallback();
-            } catch (e) { fallback(); }
+                flash(btn, "已复制");
+                navigator.clipboard.writeText(text).then(null, fail);
+              } else fail();
+            } catch (e) { fail(); }
           });
         });
 
