@@ -21,7 +21,7 @@
 #   ARGO_TOKEN  固定隧道 Token（不填则用临时隧道 trycloudflare）
 #   ARGO_DOMAIN 固定隧道绑定的域名（固定隧道必填）
 #   SUB         Argo 订阅：1 开启（默认）/0 关闭；只通过 Argo 域名访问，不开公网端口
-#   CFIP/CFPORT Argo 节点的优选地址/端口，默认 cf.090227.xyz / 443
+#   CFIP/CFPORT Argo 节点的优选地址/端口，默认 saas.sin.fan / 443
 #   NAME        节点名前缀，默认主机名
 #   IP_MODE     节点用哪个 IP：auto（优先 v4）/4/6/both，默认 auto
 #   SB_VERSION  固定 sing-box 版本（需 ≥1.12，如 1.12.9），默认最新正式版
@@ -29,7 +29,7 @@
 set -o pipefail
 export LANG=en_US.UTF-8
 
-SCRIPT_VERSION="3.6.0"
+SCRIPT_VERSION="3.6.1"
 DIR=/etc/sing-box
 ENV_FILE=$DIR/sb.env
 CONF=$DIR/config.json
@@ -531,7 +531,7 @@ do_install() {
   UUID=${UUID:-$(cat /proc/sys/kernel/random/uuid)}
   valid_uuid "$UUID" || die "UUID 格式不对：$UUID"
   SNI=${SNI:-www.iij.ad.jp}
-  CFIP=${CFIP:-cf.090227.xyz}
+  CFIP=${CFIP:-saas.sin.fan}
   CFPORT=${CFPORT:-443}
   NAME=${NAME:-$(hostname | cut -c1-20)}
   if [ -z "${PORT:-}" ] && [ -t 0 ]; then
