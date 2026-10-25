@@ -31,7 +31,7 @@
 set -o pipefail
 export LANG=en_US.UTF-8
 
-SCRIPT_VERSION="3.9.1"
+SCRIPT_VERSION="3.9.2"
 DIR=/etc/sing-box
 ENV_FILE=$DIR/sb.env
 CONF=$DIR/config.json
@@ -468,7 +468,7 @@ remove_service() {
 
 # 独立的 Nginx 实例（不碰系统 nginx）：只听 127.0.0.1:ARGO_PORT，按路径分流到各 Argo 协议和订阅
 setup_nginx() {
-  has nginx || { info "安装 Nginx"; pkg_install nginx || die "Nginx 安装失败"; }
+  has nginx || { info "安装 Nginx"; pkg_install nginx || die "Nginx 安装失败"; mkdir -p "$DIR"; touch "$DIR/.nginx_by_sb"; }
   mkdir -p "$DIR/nginx"
   local ap loc=""
   for ap in vless vmess trojan; do
@@ -543,11 +543,13 @@ open_ports() {
   on vmess && tcp+=("$(pt vmess)")
   on shadowtls && tcp+=("$(pt shadowtls)")
   if has ufw && ufw status 2>/dev/null | grep -q "^Status: active"; then
-    for p in "${tcp[@]}"; do ufw allow "$p/tcp" >/dev/null; done
-    for p in "${udp[@]}"; do ufw allow "$p/udp" >/dev/null; done
+    local d=""; [ "${1:-}" = del ] && d=delete
+    for p in "${tcp[@]}"; do ufw $d allow "$p/tcp" >/dev/null 2>&1; done
+    for p in "${udp[@]}"; do ufw $d allow "$p/udp" >/dev/null 2>&1; done
   elif has firewall-cmd && firewall-cmd --state >/dev/null 2>&1; then
-    for p in "${tcp[@]}"; do firewall-cmd -q --permanent --add-port="$p/tcp"; done
-    for p in "${udp[@]}"; do firewall-cmd -q --permanent --add-port="$p/udp"; done
+    local a=add; [ "${1:-}" = del ] && a=remove
+    for p in "${tcp[@]}"; do firewall-cmd -q --permanent --$a-port="$p/tcp" 2>/dev/null; done
+    for p in "${udp[@]}"; do firewall-cmd -q --permanent --$a-port="$p/udp" 2>/dev/null; done
     firewall-cmd -q --reload
   fi
 }
@@ -809,12 +811,20 @@ do_status() {
 }
 
 do_uninstall() {
-  need_root; detect_init
+  need_root; detect_init; load_env
   remove_service sb-argo; remove_service sb-nginx; remove_service sing-box
+  [ -n "${PORT:-}" ] && open_ports del  # 撤销安装时放行的防火墙端口
+  if [ -f "$DIR/.nginx_by_sb" ]; then  # Nginx 是本脚本装的才卸载，原有的系统 Nginx 不动
+    info "卸载 Nginx"
+    if has apt-get; then apt-get purge -y -qq nginx nginx-common nginx-core >/dev/null 2>&1; apt-get autoremove -y -qq >/dev/null 2>&1
+    elif has dnf; then dnf remove -y -q nginx >/dev/null 2>&1
+    elif has yum; then yum remove -y -q nginx >/dev/null 2>&1
+    elif has apk; then apk del -q nginx >/dev/null 2>&1; fi
+  fi
   [ "$(readlink /usr/bin/sb 2>/dev/null)" = "$SELF" ] && rm -f /usr/bin/sb
   rm -f "$SYSCTL_FILE"
   rm -rf "$DIR" "$SELF"
-  info "已卸载（防火墙规则如有需要请手动删除）"
+  info "已卸载：服务、配置、证书、内核、sb 命令、sysctl 调优、放行的端口均已清除"
 }
 
 port_menu() {
