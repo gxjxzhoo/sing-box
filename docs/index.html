@@ -169,20 +169,6 @@
             </div>
 
             <div class="x-panel">
-              <h3>WARP 出站</h3>
-              <div class="x-radios" role="radiogroup" aria-label="WARP 出站">
-                <label class="x-chip"><input type="radio" name="warp" value="" checked /><b></b>关闭</label>
-                <label class="x-chip"><input type="radio" name="warp" value="ai" /><b></b>仅 AI 与流媒体</label>
-                <label class="x-chip"><input type="radio" name="warp" value="all" /><b></b>全部走 WARP</label>
-              </div>
-              <p class="x-hint">AI 与流媒体：ChatGPT、Claude、Gemini、Netflix、Disney+ 等。安装时自动免费注册 WARP 账号。</p>
-              <div class="x-field" id="warpDomBox" hidden>
-                <label for="warpDom">WARP_DOMAINS <small>可选，额外域名后缀，逗号分隔</small></label>
-                <input class="x-input" id="warpDom" type="text" spellcheck="false" placeholder="example.com,foo.org" />
-              </div>
-            </div>
-
-            <div class="x-panel">
               <details class="x-details x-details--main">
                 <summary>高级设置</summary>
                 <div class="x-details__body">
@@ -238,7 +224,6 @@
             <div class="x-panel"><p>查看节点 / 订阅</p><div class="x-row"><pre class="x-code">sb nodes</pre><button type="button" class="btn" data-copy>复制</button></div></div>
             <div class="x-panel"><p>运行状态</p><div class="x-row"><pre class="x-code">sb status</pre><button type="button" class="btn" data-copy>复制</button></div></div>
             <div class="x-panel"><p>更新脚本并自动刷新配置</p><div class="x-row"><pre class="x-code">sb upgrade</pre><button type="button" class="btn" data-copy>复制</button></div></div>
-            <div class="x-panel"><p>安装后开关 WARP（可为 ai / all / 0）</p><div class="x-row"><pre class="x-code">sb set WARP=ai</pre><button type="button" class="btn" data-copy>复制</button></div></div>
             <div class="x-panel"><p>改优选地址</p><div class="x-row"><pre class="x-code">sb set CFIP=地址 CFPORT=443</pre><button type="button" class="btn" data-copy>复制</button></div></div>
             <div class="x-panel"><p>改 Argo 本地端口</p><div class="x-row"><pre class="x-code">sb set ARGO_PORT=8001</pre><button type="button" class="btn" data-copy>复制</button></div></div>
             <div class="x-panel"><p>卸载</p><div class="x-row"><pre class="x-code">sb uninstall</pre><button type="button" class="btn" data-copy>复制</button></div></div>
@@ -330,13 +315,12 @@
         function update() {
           var sel = P.filter(function (p) { return p.cb.checked; });
           var has = function (k) { return sel.some(function (p) { return p.k === k; }); };
-          var argo = has("argo"), fixed = radio("tun") === "fixed", warp = radio("warp");
+          var argo = has("argo"), fixed = radio("tun") === "fixed";
           var ok = true;
 
           $("argoPanel").hidden = !argo;
           $("fixedBox").hidden = !fixed;
           $("sniBox").hidden = !has("reality");
-          $("warpDomBox").hidden = warp !== "ai";
           $("allBtn").textContent = sel.length === P.length ? "取消全选" : "全选";
 
           $("protoErr").textContent = sel.length ? "" : "请至少选择一个协议";
@@ -396,8 +380,6 @@
             add("CFIP", val("cfip"));
             add("CFPORT", val("cfport"));
           }
-          add("WARP", warp);
-          if (warp === "ai") add("WARP_DOMAINS", $("warpDom").value.replace(/\s+/g, ""));
           add("NAME", val("name"));
           if ($("ipMode").value !== "auto") add("IP_MODE", $("ipMode").value);
           if (has("reality")) add("SNI", val("sni"));
