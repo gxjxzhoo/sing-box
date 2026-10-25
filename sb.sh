@@ -30,7 +30,7 @@
 set -o pipefail
 export LANG=en_US.UTF-8
 
-SCRIPT_VERSION="3.7.6"
+SCRIPT_VERSION="3.7.7"
 DIR=/etc/sing-box
 ENV_FILE=$DIR/sb.env
 CONF=$DIR/config.json
@@ -539,6 +539,8 @@ trim_logs() { local f; for f in "$DIR"/*.log; do [ -f "$f" ] && [ "$(wc -c <"$f"
 tune_sysctl() { # BBR+fq（TCP 协议提速）与更大的 UDP 缓冲（Hy2/TUIC 的 QUIC 吞吐）
   [ "${TUNE:-1}" = 0 ] && { rm -f "$SYSCTL_FILE"; return 0; }
   [ -f "$SYSCTL_FILE" ] && return 0
+  # 容器（LXC/OpenVZ/Docker）里内核参数由宿主机决定，改不了，直接跳过
+  if { has systemd-detect-virt && systemd-detect-virt -cq; } || [ -d /proc/vz ] || [ -f /.dockerenv ] || [ -f /run/.containerenv ]; then return 0; fi
   mkdir -p "${SYSCTL_FILE%/*}"; local f=$SYSCTL_FILE.new
   : > "$f"
   if grep -qw bbr /proc/sys/net/ipv4/tcp_available_congestion_control 2>/dev/null || modprobe tcp_bbr 2>/dev/null; then
