@@ -30,7 +30,7 @@
 set -o pipefail
 export LANG=en_US.UTF-8
 
-SCRIPT_VERSION="3.7.7"
+SCRIPT_VERSION="3.7.8"
 DIR=/etc/sing-box
 ENV_FILE=$DIR/sb.env
 CONF=$DIR/config.json
@@ -486,10 +486,12 @@ show_nodes() {
   load_env
   [ -f "$CONF" ] || die "尚未安装"
   local ip n host sfx nn ips; ips=$(node_ips) || exit 1; nn=$(urlenc "${NAME}")
+  # 自签证书指纹（同旧版 sb）：Hy2 客户端用 pinSHA256 锁定证书，比单纯跳过验证安全
+  local fp; fp=$(openssl x509 -noout -fingerprint -sha256 -in "$DIR/cert.pem" 2>/dev/null | cut -d= -f2 | sed 's/:/%3A/g')
   {
    while read -r ip sfx; do
     n="$nn$sfx"
-    on hy2     && echo "hysteria2://$UUID@$ip:$(pt hy2)?sni=www.bing.com&alpn=h3&insecure=1#$n-hy2"
+    on hy2     && echo "hysteria2://$UUID@$ip:$(pt hy2)?sni=www.bing.com&alpn=h3&insecure=1${fp:+&pinSHA256=$fp}#$n-hy2"
     on reality && echo "vless://$UUID@$ip:$(pt reality)?encryption=none&flow=xtls-rprx-vision&security=reality&sni=$SNI&fp=chrome&pbk=$REALITY_PUBLIC&sid=$REALITY_SID&type=tcp#$n-reality"
     on tuic    && echo "tuic://$UUID:$UUID@$ip:$(pt tuic)?sni=www.bing.com&alpn=h3&congestion_control=bbr&udp_relay_mode=native&allow_insecure=1#$n-tuic"
     on trojan  && echo "trojan://$UUID@$ip:$(pt trojan)?security=tls&sni=www.bing.com&allowInsecure=1&type=tcp#$n-trojan"
