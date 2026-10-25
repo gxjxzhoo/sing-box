@@ -11,13 +11,13 @@
 #   bash sb.sh restart|status|update|upgrade|uninstall   （upgrade=更新本脚本）
 #
 # 安装时可用的环境变量：
-#   PORT        直连起始端口（Reality=PORT，Hy2=+1，TUIC=+2，AnyTLS=+3，Socks5=+4，SS=+5，Trojan=+6，VMess=+7，ShadowTLS=+8；默认随机）
-#   REALITY_PORT/HY2_PORT/TUIC_PORT/ANYTLS_PORT/SOCKS_PORT/SS_PORT/TROJAN_PORT/VMESS_PORT/SHADOWTLS_PORT  单独指定某协议端口（留空=按 PORT 推算）
+#   PORT        直连起始端口（Hy2=PORT，Reality=+1，TUIC=+2，Trojan=+3，VMess=+4，SS=+5，AnyTLS=+6，ShadowTLS=+7，Socks5=+8；默认随机）
+#   HY2_PORT/REALITY_PORT/TUIC_PORT/TROJAN_PORT/VMESS_PORT/SS_PORT/ANYTLS_PORT/SHADOWTLS_PORT/SOCKS_PORT  单独指定某协议端口（留空=按 PORT 推算）
 #   PROTOCOLS   要启用的协议，逗号分隔，默认 argo,hy2,reality；可加 tuic,trojan,vmess,ss,anytls,shadowtls,socks
 #   ARGO_PROTO  Argo 隧道里跑的协议：vless（默认）/vmess/trojan
 #   UUID        默认随机
 #   SNI         Reality 偷取的站点，默认 www.iij.ad.jp
-#   ARGO_PORT   Argo 本地端口（只监听 127.0.0.1），默认随机
+#   ARGO_PORT   Argo 本地端口（只监听 127.0.0.1），默认 8001（被占用则随机）
 #   ARGO_TOKEN  固定隧道 Token（不填则用临时隧道 trycloudflare）
 #   ARGO_DOMAIN 固定隧道绑定的域名（固定隧道必填）
 #   SUB         Argo 订阅：1 开启（默认）/0 关闭；只通过 Argo 域名访问，不开公网端口
@@ -31,7 +31,7 @@
 set -o pipefail
 export LANG=en_US.UTF-8
 
-SCRIPT_VERSION="3.8.2"
+SCRIPT_VERSION="3.8.3"
 DIR=/etc/sing-box
 ENV_FILE=$DIR/sb.env
 CONF=$DIR/config.json
@@ -137,12 +137,25 @@ node_ips() { # 按 IP_MODE 输出“地址 后缀”：auto=优先 v4，4/6=只�
 }
 
 # ---------- 状态文件（唯一数据源，权限 600）----------
-load_env() { [ -f "$ENV_FILE" ] && . "$ENV_FILE"; }
+load_env() {
+  [ -f "$ENV_FILE" ] || return 0
+  . "$ENV_FILE"
+  # 3.8.3 起端口偏移按协议顺序排列；旧安装把原来推算出的端口写死，升级后端口不变
+  if [ "${PORT_LAYOUT:-1}" != 2 ] && [ -n "${PORT:-}" ]; then
+    local k o
+    for k in REALITY_PORT:0 HY2_PORT:1 TUIC_PORT:2 ANYTLS_PORT:3 SOCKS_PORT:4 SS_PORT:5 TROJAN_PORT:6 VMESS_PORT:7 SHADOWTLS_PORT:8; do
+      o=${k#*:}; k=${k%%:*}
+      [ -n "${!k:-}" ] || printf -v "$k" '%s' "$((PORT + o))"
+    done
+  fi
+  PORT_LAYOUT=2
+}
 
 save_env() {
   local k
   umask 077
   {
+    echo "PORT_LAYOUT=2"
     for k in UUID PORT $PORT_KEYS PROTOCOLS IP_MODE SNI ARGO_PORT ARGO_TOKEN ARGO_DOMAIN CFIP CFPORT NAME TUNE CERT_CUSTOM \
              REALITY_PRIVATE REALITY_PUBLIC REALITY_SID SS_PASSWORD STLS_INNER_PORT ARGO_PROTO SUB SUB_TOKEN SUB_PORT SB_VERSION; do
       printf '%s=%q\n' "$k" "${!k:-}"
@@ -155,18 +168,18 @@ on() { [[ ",$PROTOCOLS," == *",$1,"* ]]; }
 sub_on() { on argo && [ "${SUB:-1}" != 0 ]; }
 
 # 各协议端口：单独设置优先，否则按 PORT 推算
-PORT_KEYS="REALITY_PORT HY2_PORT TUIC_PORT ANYTLS_PORT SOCKS_PORT SS_PORT TROJAN_PORT VMESS_PORT SHADOWTLS_PORT"
+PORT_KEYS="HY2_PORT REALITY_PORT TUIC_PORT TROJAN_PORT VMESS_PORT SS_PORT ANYTLS_PORT SHADOWTLS_PORT SOCKS_PORT"
 pt() {
   case "$1" in
-    reality) echo "${REALITY_PORT:-$PORT}" ;;
-    hy2)     echo "${HY2_PORT:-$((PORT + 1))}" ;;
+    hy2)     echo "${HY2_PORT:-$PORT}" ;;
+    reality) echo "${REALITY_PORT:-$((PORT + 1))}" ;;
     tuic)    echo "${TUIC_PORT:-$((PORT + 2))}" ;;
-    anytls)  echo "${ANYTLS_PORT:-$((PORT + 3))}" ;;
-    socks)   echo "${SOCKS_PORT:-$((PORT + 4))}" ;;
+    trojan)  echo "${TROJAN_PORT:-$((PORT + 3))}" ;;
+    vmess)   echo "${VMESS_PORT:-$((PORT + 4))}" ;;
     ss)      echo "${SS_PORT:-$((PORT + 5))}" ;;
-    trojan)  echo "${TROJAN_PORT:-$((PORT + 6))}" ;;
-    vmess)   echo "${VMESS_PORT:-$((PORT + 7))}" ;;
-    shadowtls) echo "${SHADOWTLS_PORT:-$((PORT + 8))}" ;;
+    anytls)  echo "${ANYTLS_PORT:-$((PORT + 6))}" ;;
+    shadowtls) echo "${SHADOWTLS_PORT:-$((PORT + 7))}" ;;
+    socks)   echo "${SOCKS_PORT:-$((PORT + 8))}" ;;
   esac
 }
 
@@ -671,6 +684,11 @@ do_install() {
     ARGO_TOKEN=$(ask "Argo 固定隧道 Token（回车用临时隧道）" "")
     [ -n "$ARGO_TOKEN" ] && ARGO_DOMAIN=$(ask "固定隧道域名" "${ARGO_DOMAIN:-}")
   fi
+  if on argo && [ -t 0 ] && [ ! -f "$ENV_FILE" ]; then
+    local ap; ap=$(ask "Argo 本地端口（固定隧道在 CF 里填 HTTP → 127.0.0.1:此端口）" "$ARGO_PORT")
+    valid_port "$ap" && ARGO_PORT=$ap || warn "端口无效，沿用 $ARGO_PORT"
+    check_ports
+  fi
   if on argo && [ -n "${ARGO_TOKEN:-}" ] && [ -z "${ARGO_DOMAIN:-}" ]; then
     die "使用固定隧道 ARGO_TOKEN 时必须同时设置 ARGO_DOMAIN"
   fi
@@ -769,10 +787,12 @@ port_menu() {
   for x in $DIRECT; do on "$x" && list+=("$x"); done
   echo "  1. 起始端口（各协议顺延）：$PORT"
   for i in "${!list[@]}"; do echo "  $((i + 2)). ${list[$i]}：$(pt "${list[$i]}")"; done
+  on argo && echo "  a. Argo 本地端口：$ARGO_PORT"
   echo "  0. 返回"
   i=$(ask "请选择" "")
   case "$i" in
     0|"") return ;;
+    a|A) on argo && argo_port_set || warn "无效选项" ;;
     1) do_set "PORT=$(ask "新的起始端口" "${PORT:-}")" ;;
     *) [[ "$i" =~ ^[0-9]+$ ]] && x=${list[$((i - 2))]:-} || x=""
        [ -n "$x" ] || { warn "无效选项"; return; }
@@ -820,7 +840,7 @@ argo_menu() {
   on argo || { warn "未启用 Argo，请先在「选择协议」里勾选"; return; }
   local t="临时隧道"; [ -n "${ARGO_TOKEN:-}" ] && t="固定隧道（$ARGO_DOMAIN）"
   echo "  隧道：$t   协议：${ARGO_PROTO:-vless}   订阅：$(sub_on && echo 开启 || echo 关闭)"
-  printf '  %s\n' "1. 设置固定隧道" "2. 改回临时隧道" "3. 切换隧道协议" "4. 订阅开/关" "5. 更换订阅令牌" "0. 返回"
+  printf '  %s\n' "1. 设置固定隧道" "2. 改回临时隧道" "3. 切换隧道协议" "4. 订阅开/关" "5. 更换订阅令牌" "6. 修改本地端口（当前 $ARGO_PORT）" "0. 返回"
   case "$(ask "请选择" "")" in
     1) do_set "ARGO_TOKEN=$(ask "隧道 Token" "")" "ARGO_DOMAIN=$(ask "隧道域名" "${ARGO_DOMAIN:-}")" ;;
     2) do_set "ARGO_TOKEN=" "ARGO_DOMAIN=" ;;
@@ -830,7 +850,15 @@ argo_menu() {
        esac ;;
     4) if sub_on; then do_set SUB=0; else do_set SUB=1; fi ;;
     5) do_set SUB_TOKEN= ;;
+    6) argo_port_set ;;
   esac
+}
+
+argo_port_set() {
+  local p; p=$(ask "Argo 本地端口（回车不变）" "$ARGO_PORT")
+  [ "$p" = "$ARGO_PORT" ] && return
+  do_set "ARGO_PORT=$p"
+  [ -n "${ARGO_TOKEN:-}" ] && warn "记得把 Cloudflare 里 $ARGO_DOMAIN 的服务改为 HTTP → 127.0.0.1:$p" || true
 }
 
 update_menu() {
