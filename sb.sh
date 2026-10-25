@@ -30,7 +30,7 @@
 set -o pipefail
 export LANG=en_US.UTF-8
 
-SCRIPT_VERSION="3.7.1"
+SCRIPT_VERSION="3.7.2"
 DIR=/etc/sing-box
 ENV_FILE=$DIR/sb.env
 CONF=$DIR/config.json
@@ -758,51 +758,85 @@ ip_menu() {
   echo "  1. 自动（优先 IPv4）  2. 仅 IPv4  3. 仅 IPv6  4. 同时输出 IPv4 和 IPv6"
   case "$(ask "请选择" "")" in
     1) do_set IP_MODE=auto ;; 2) do_set IP_MODE=4 ;; 3) do_set IP_MODE=6 ;; 4) do_set IP_MODE=both ;;
-    *) return ;;
   esac
 }
 
+argo_menu() {
+  on argo || { warn "未启用 Argo，请先在「选择协议」里勾选"; return; }
+  local t="临时隧道"; [ -n "${ARGO_TOKEN:-}" ] && t="固定隧道（$ARGO_DOMAIN）"
+  echo "  隧道：$t   协议：${ARGO_PROTO:-vless}   订阅：$(sub_on && echo 开启 || echo 关闭)"
+  echo "  1. 设置固定隧道      2. 改回临时隧道"
+  echo "  3. 切换隧道协议      4. 订阅开/关"
+  echo "  5. 更换订阅令牌      0. 返回"
+  case "$(ask "请选择" "")" in
+    1) do_set "ARGO_TOKEN=$(ask "隧道 Token" "")" "ARGO_DOMAIN=$(ask "隧道域名" "${ARGO_DOMAIN:-}")" ;;
+    2) do_set "ARGO_TOKEN=" "ARGO_DOMAIN=" ;;
+    3) case "$(ask "1 vless  2 vmess  3 trojan" "")" in
+         1) do_set ARGO_PROTO=vless ;; 2) do_set ARGO_PROTO=vmess ;; 3) do_set ARGO_PROTO=trojan ;;
+       esac ;;
+    4) if sub_on; then do_set SUB=0; else do_set SUB=1; fi ;;
+    5) do_set SUB_TOKEN= ;;
+  esac
+}
+
+update_menu() {
+  echo "  内核：$("$BIN_SB" version 2>/dev/null | head -1 | awk '{print $3}')   脚本：v$SCRIPT_VERSION"
+  echo "  1. 更新 sing-box/cloudflared 内核   2. 更新本脚本   0. 返回"
+  case "$(ask "请选择" "")" in
+    1) do_update ;; 2) do_upgrade ;;
+  esac
+}
+
+menu_status() {
+  local a="" s; s=$(svc_active sing-box && echo 运行中 || echo 未运行)
+  if on argo; then
+    a="  Argo：$(svc_active sb-argo && echo 运行中 || echo 未运行)（$([ -n "${ARGO_TOKEN:-}" ] && echo 固定 || echo 临时)）"
+  fi
+  if [ "$s" = 运行中 ]; then info "sing-box：$s$a"; else err "sing-box：$s$a"; fi
+  echo "协议：${PROTOCOLS//,/ }"
+}
+
 menu() {
-  local x; load_env
+  local x; detect_init
   while true; do
+    load_env
     echo
     c "1;36" "==== sing-box 管理 v$SCRIPT_VERSION ===="
-    if [ -f "$ENV_FILE" ]; then do_status; else warn "未安装"; fi
+    if [ ! -f "$ENV_FILE" ]; then
+      warn "未安装"
+      echo " 1. 安装"
+      echo " 0. 退出"
+      x=$(ask "请选择" "")
+      case "$x" in 1) ( do_install ) ;; 0) exit 0 ;; *) warn "无效选项" ;; esac
+      continue
+    fi
+    menu_status
     cat <<'EOF'
- 1. 安装 / 重装        2. 查看节点
- 3. 修改端口           4. 修改 UUID
- 5. 设置固定隧道       6. 改回临时隧道
- 7. 选择协议           8. 重启
- 9. 更新内核           10. 卸载
-11. 节点 IPv4/IPv6     12. Argo 协议
-13. Argo 订阅          14. 更新脚本
+ 1. 查看节点 / 订阅
+ ─── 配置 ───
+ 2. 选择协议          3. 修改端口
+ 4. 修改 UUID         5. 节点 IP（v4/v6）
+ 6. Argo 隧道 / 订阅
+ ─── 维护 ───
+ 7. 重启              8. 更新
+ 9. 重装（保留设置）  10. 卸载
  0. 退出
 EOF
     x=$(ask "请选择" "")
     [ "$x" = 0 ] && exit 0
     ( case "$x" in
-      1) do_install ;;
-      2) show_nodes ;;
+      1) show_nodes ;;
+      2) proto_menu ;;
       3) port_menu ;;
       4) x=$(ask "新 UUID（回车随机生成）" ""); do_set "UUID=${x:-$(cat /proc/sys/kernel/random/uuid)}" ;;
-      5) do_set "ARGO_TOKEN=$(ask "隧道 Token" "")" "ARGO_DOMAIN=$(ask "隧道域名" "${ARGO_DOMAIN:-}")" ;;
-      6) do_set "ARGO_TOKEN=" "ARGO_DOMAIN=" ;;
-      7) proto_menu ;;
-      8) do_restart ;;
-      9) do_update ;;
+      5) ip_menu ;;
+      6) argo_menu ;;
+      7) do_restart ;;
+      8) update_menu ;;
+      9) do_install ;;
       10) [ "$(ask "确认卸载？输入 y" "")" = y ] && do_uninstall ;;
-      11) ip_menu ;;
-      12) case "$(ask "Argo 协议：1 vless  2 vmess  3 trojan" "")" in
-            1) do_set ARGO_PROTO=vless ;; 2) do_set ARGO_PROTO=vmess ;; 3) do_set ARGO_PROTO=trojan ;;
-          esac ;;
-      13) echo "  当前：$(sub_on && echo 开启 || echo 关闭)"
-          case "$(ask "1 开启  2 关闭  3 更换订阅令牌" "")" in
-            1) do_set SUB=1 ;; 2) do_set SUB=0 ;; 3) do_set SUB_TOKEN= ;;
-          esac ;;
-      14) do_upgrade ;;
       *) warn "无效选项" ;;
     esac )  # 子 shell：某项出错只返回菜单，不退出
-    load_env
   done
 }
 
