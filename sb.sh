@@ -27,7 +27,7 @@
 set -o pipefail
 export LANG=en_US.UTF-8
 
-SCRIPT_VERSION="3.4.0"
+SCRIPT_VERSION="3.4.1"
 DIR=/etc/sing-box
 ENV_FILE=$DIR/sb.env
 CONF=$DIR/config.json
@@ -451,13 +451,30 @@ do_install() {
   CFIP=${CFIP:-cf.090227.xyz}
   CFPORT=${CFPORT:-443}
   NAME=${NAME:-$(hostname | cut -c1-20)}
-  if [ -z "${PORT:-}" ]; then
-    if [ -t 0 ]; then PORT=$(ask "直连起始端口（默认占用 5 个连续端口，回车随机）" ""); fi
-    PORT=${PORT:-$(rand_port)}
+  if [ -z "${PORT:-}" ] && [ -t 0 ]; then
+    # 交互安装：逐个询问已选直连协议的端口，回车随机
+    local x v pk
+    PORT=$(rand_port)
+    for x in reality hy2 tuic anytls socks; do
+      on "$x" || continue
+      pk="$(tr a-z A-Z <<<"$x")_PORT"
+      [ -n "${!pk:-}" ] && continue
+      while :; do
+        v=$(ask "$x 端口（回车随机）" "")
+        [ -n "$v" ] || v=$(rand_port)
+        valid_port "$v" && break; warn "端口无效：$v"
+      done
+      printf -v "$pk" '%s' "$v"
+    done
   fi
+  PORT=${PORT:-$(rand_port)}
   valid_port "$PORT" || die "端口无效：$PORT"
   ARGO_PORT=${ARGO_PORT:-$(rand_port)}
   check_ports
+  if on argo && [ -z "${ARGO_TOKEN:-}" ] && [ -t 0 ] && [ ! -f "$ENV_FILE" ]; then
+    ARGO_TOKEN=$(ask "Argo 固定隧道 Token（回车用临时隧道）" "")
+    [ -n "$ARGO_TOKEN" ] && ARGO_DOMAIN=$(ask "固定隧道域名" "${ARGO_DOMAIN:-}")
+  fi
   if on argo && [ -n "${ARGO_TOKEN:-}" ] && [ -z "${ARGO_DOMAIN:-}" ]; then
     die "使用固定隧道 ARGO_TOKEN 时必须同时设置 ARGO_DOMAIN"
   fi
