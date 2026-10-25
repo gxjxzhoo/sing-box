@@ -30,7 +30,7 @@
 set -o pipefail
 export LANG=en_US.UTF-8
 
-SCRIPT_VERSION="3.7.2"
+SCRIPT_VERSION="3.7.3"
 DIR=/etc/sing-box
 ENV_FILE=$DIR/sb.env
 CONF=$DIR/config.json
@@ -730,10 +730,11 @@ port_menu() {
 pick_protocols() {
   local all=(${ALL_PROTOCOLS//,/ }) desc=("Hysteria2" "VLESS-Reality" "Argo 隧道（${ARGO_PROTO:-vless}-WS）" "TUIC v5" "Trojan（TLS）" "VMess-WS" "Shadowsocks-2022" "AnyTLS" "ShadowTLS v3" "Socks5")
   local L=abcdefghij i n sel="" tok idx
-  if [ -f "$ENV_FILE" ]; then echo "  [x] = 当前已安装" >&2; else echo "  [x] = 默认选中" >&2; fi
+  if [ -f "$ENV_FILE" ]; then echo "  ✓ = 当前已安装" >&2; else echo "  ✓ = 默认选中" >&2; fi
   for i in "${!all[@]}"; do
-    if on "${all[$i]}"; then tok="[x]"; else tok="[ ]"; fi
-    printf '  %s. %s %s\n' "${L:$i:1}" "$tok" "${desc[$i]}" >&2
+    # 勾放在行尾：✓ 在中文终端里宽度不定，放行首会让后面错位
+    if on "${all[$i]}"; then printf '  %s. %s \033[1;32m✓\033[0m\n' "${L:$i:1}" "${desc[$i]}" >&2
+    else printf '  %s. %s\n' "${L:$i:1}" "${desc[$i]}" >&2; fi
   done
   n=$(ask "输入要启用的协议（如 abce，回车=${1:-不变}）" "")
   [ -n "$n" ] || return 0
