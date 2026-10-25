@@ -28,6 +28,7 @@
       .x-chip b { display: inline-grid; place-items: center; width: 22px; height: 22px; border-radius: 50%; border: 1px solid var(--stroke-primary); font: var(--type-tag); flex: none; }
       .x-chip:has(input:checked) { background: var(--fill-primary); color: var(--text-primary-on); border-color: var(--fill-primary); }
       .x-chip:has(input:checked) b { background: var(--fill-primary-on); border-color: var(--fill-primary-on); color: var(--text-primary); }
+      .x-chip input[type="checkbox"]:checked + b::after { content: "✓"; }
       .x-chip:has(input:focus-visible) { outline: 2px solid var(--fill-primary); outline-offset: 2px; }
       .x-field { display: grid; gap: 6px; min-width: 0; }
       .x-field > label, .x-label { font: var(--type-label); }
@@ -253,18 +254,18 @@
     <script>
       (function () {
         var P = [
-          { l: "a", k: "reality", n: "VLESS-Reality", off: 0, env: "REALITY_PORT" },
-          { l: "b", k: "hy2", n: "Hysteria2", off: 1, env: "HY2_PORT" },
-          { l: "c", k: "tuic", n: "TUIC v5", off: 2, env: "TUIC_PORT" },
-          { l: "d", k: "anytls", n: "AnyTLS", off: 3, env: "ANYTLS_PORT" },
-          { l: "e", k: "argo", n: "Argo 隧道" },
-          { l: "f", k: "socks", n: "Socks5", off: 4, env: "SOCKS_PORT" },
-          { l: "g", k: "ss", n: "Shadowsocks-2022", off: 5, env: "SS_PORT" },
-          { l: "h", k: "trojan", n: "Trojan (TLS)", off: 6, env: "TROJAN_PORT" },
-          { l: "i", k: "vmess", n: "VMess-WS", off: 7, env: "VMESS_PORT" },
-          { l: "j", k: "shadowtls", n: "ShadowTLS v3", off: 8, env: "SHADOWTLS_PORT" }
+          { k: "hy2", n: "Hysteria2", off: 1, env: "HY2_PORT" },
+          { k: "reality", n: "VLESS-Reality", off: 0, env: "REALITY_PORT" },
+          { k: "argo", n: "Argo 隧道" },
+          { k: "tuic", n: "TUIC v5", off: 2, env: "TUIC_PORT" },
+          { k: "trojan", n: "Trojan (TLS)", off: 6, env: "TROJAN_PORT" },
+          { k: "vmess", n: "VMess-WS", off: 7, env: "VMESS_PORT" },
+          { k: "ss", n: "Shadowsocks-2022", off: 5, env: "SS_PORT" },
+          { k: "anytls", n: "AnyTLS", off: 3, env: "ANYTLS_PORT" },
+          { k: "shadowtls", n: "ShadowTLS v3", off: 8, env: "SHADOWTLS_PORT" },
+          { k: "socks", n: "Socks5", off: 4, env: "SOCKS_PORT" }
         ];
-        var DEF = ["reality", "hy2", "tuic", "anytls", "argo"];
+        var DEF = ["hy2", "argo"];
         var SCRIPT = "bash <(curl -fsSL https://raw.githubusercontent.com/gxjxzhoo/sing-box/main/sb.sh) install </dev/null";
         var UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
         var $ = function (id) { return document.getElementById(id); };
@@ -275,7 +276,7 @@
         P.forEach(function (p) {
           var lab = document.createElement("label");
           lab.className = "x-chip";
-          lab.innerHTML = '<input type="checkbox" value="' + p.k + '"' + (DEF.indexOf(p.k) > -1 ? " checked" : "") + " /><b>" + p.l + "</b>" + p.n;
+          lab.innerHTML = '<input type="checkbox" value="' + p.k + '"' + (DEF.indexOf(p.k) > -1 ? " checked" : "") + " /><b aria-hidden=\"true\"></b>" + p.n;
           protoBox.appendChild(lab);
           p.cb = lab.querySelector("input");
           if (p.env) {
