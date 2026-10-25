@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # sing-box 一键脚本（单文件重写版）
-# 入站：VLESS-Reality / Hysteria2 / TUIC v5 / AnyTLS（直连）+ VLESS-WS（Cloudflare Argo 隧道）
+# 入站：VLESS-Reality / Hysteria2 / TUIC v5 / AnyTLS / Socks5（直连）+ VLESS-WS（Cloudflare Argo 隧道）
 # 支持：Debian/Ubuntu/CentOS/RHEL/Alpine，systemd 或 OpenRC；amd64/arm64/armv7/386
 #
 # 用法：
@@ -11,8 +11,8 @@
 #   bash sb.sh restart|status|update|uninstall
 #
 # 安装时可用的环境变量：
-#   PORT        直连起始端口（Reality=PORT，Hy2=+1，TUIC=+2，AnyTLS=+3；默认随机）
-#   PROTOCOLS   要启用的协议，逗号分隔，默认 reality,hy2,tuic,anytls,argo
+#   PORT        直连起始端口（Reality=PORT，Hy2=+1，TUIC=+2，AnyTLS=+3，Socks5=+4；默认随机）
+#   PROTOCOLS   要启用的协议，逗号分隔，默认 reality,hy2,tuic,anytls,argo；可加 socks
 #   UUID        默认随机
 #   SNI         Reality 偷取的站点，默认 www.iij.ad.jp
 #   ARGO_PORT   Argo 本地端口（只监听 127.0.0.1），默认随机
@@ -25,7 +25,7 @@
 set -o pipefail
 export LANG=en_US.UTF-8
 
-SCRIPT_VERSION="3.0.1"
+SCRIPT_VERSION="3.1.0"
 DIR=/etc/sing-box
 ENV_FILE=$DIR/sb.env
 CONF=$DIR/config.json
@@ -34,7 +34,8 @@ BIN_SB=$DIR/sing-box
 BIN_CF=$DIR/cloudflared
 SELF=/usr/local/bin/sb
 SCRIPT_URL=${SCRIPT_URL:-https://raw.githubusercontent.com/gxjxzhoo/sing-box/main/sb.sh}
-ALL_PROTOCOLS="reality,hy2,tuic,anytls,argo"
+ALL_PROTOCOLS="reality,hy2,tuic,anytls,argo,socks"
+DEFAULT_PROTOCOLS="reality,hy2,tuic,anytls,argo"
 
 # ---------- 输出 ----------
 c() { printf '\033[%sm%s\033[0m\n' "$1" "$2"; }
@@ -190,7 +191,7 @@ ensure_keys() {
 
 # ---------- 生成配置 ----------
 build_config() {
-  local hy2=$((PORT + 1)) tuic=$((PORT + 2)) anytls=$((PORT + 3)) tls inb='[]'
+  local hy2=$((PORT + 1)) tuic=$((PORT + 2)) anytls=$((PORT + 3)) socks=$((PORT + 4)) tls inb='[]'
   tls=$(jq -n --arg c "$DIR/cert.pem" --arg k "$DIR/key.pem" \
         '{enabled:true, certificate_path:$c, key_path:$k}')
 
@@ -215,6 +216,10 @@ build_config() {
   on anytls && inb=$(jq --argjson p "$anytls" --arg u "$UUID" --argjson t "$tls" '. + [{
         type:"anytls", tag:"anytls", listen:"::", listen_port:$p,
         users:[{password:$u}], tls:$t}]' <<<"$inb")
+
+  on socks && inb=$(jq --argjson p "$socks" --arg n "${UUID%%-*}" --arg u "$UUID" '. + [{
+        type:"socks", tag:"socks", listen:"::", listen_port:$p,
+        users:[{username:$n, password:$u}]}]' <<<"$inb")
 
   on argo && inb=$(jq --argjson p "$ARGO_PORT" --arg u "$UUID" '. + [{
         type:"vless", tag:"argo", listen:"127.0.0.1", listen_port:$p,
@@ -319,6 +324,7 @@ open_ports() {
   on hy2 && udp+=("$((PORT + 1))")
   on tuic && udp+=("$((PORT + 2))")
   on anytls && tcp+=("$((PORT + 3))")
+  on socks && { tcp+=("$((PORT + 4))"); udp+=("$((PORT + 4))"); }
   if has ufw && ufw status 2>/dev/null | grep -q active; then
     for p in "${tcp[@]}"; do ufw allow "$p/tcp" >/dev/null; done
     for p in "${udp[@]}"; do ufw allow "$p/udp" >/dev/null; done
@@ -351,6 +357,7 @@ show_nodes() {
     on hy2     && echo "hysteria2://$UUID@$ip:$((PORT + 1))?sni=www.bing.com&alpn=h3&insecure=1#$n-hy2"
     on tuic    && echo "tuic://$UUID:$UUID@$ip:$((PORT + 2))?sni=www.bing.com&alpn=h3&congestion_control=bbr&udp_relay_mode=native&allow_insecure=1#$n-tuic"
     on anytls  && echo "anytls://$UUID@$ip:$((PORT + 3))?sni=www.bing.com&insecure=1#$n-anytls"
+    on socks   && echo "socks5://${UUID%%-*}:$UUID@$ip:$((PORT + 4))#$n-socks5"
     if on argo; then
       host=$(argo_domain)
       if [ -n "$host" ]; then
@@ -390,17 +397,17 @@ do_install() {
   fi
   mkdir -p "$DIR"; chmod 700 "$DIR"
 
-  PROTOCOLS=${PROTOCOLS:-$ALL_PROTOCOLS}
+  PROTOCOLS=${PROTOCOLS:-$DEFAULT_PROTOCOLS}
   UUID=${UUID:-$(cat /proc/sys/kernel/random/uuid)}
   SNI=${SNI:-www.iij.ad.jp}
   CFIP=${CFIP:-cf.090227.xyz}
   CFPORT=${CFPORT:-443}
   NAME=${NAME:-$(hostname | cut -c1-20)}
   if [ -z "${PORT:-}" ]; then
-    if [ -t 0 ]; then PORT=$(ask "直连起始端口（占用 4 个连续端口，回车随机）" ""); fi
+    if [ -t 0 ]; then PORT=$(ask "直连起始端口（占用 5 个连续端口，回车随机）" ""); fi
     PORT=${PORT:-$(rand_port)}
   fi
-  valid_port "$PORT" && [ "$PORT" -le 65532 ] || die "端口无效：$PORT"
+  valid_port "$PORT" && [ "$PORT" -le 65531 ] || die "端口无效：$PORT"
   ARGO_PORT=${ARGO_PORT:-$(rand_port)}
   if on argo && [ -n "${ARGO_TOKEN:-}" ] && [ -z "${ARGO_DOMAIN:-}" ]; then
     die "使用固定隧道 ARGO_TOKEN 时必须同时设置 ARGO_DOMAIN"
@@ -428,16 +435,17 @@ install_self() {
 do_set() { # KEY=VAL ...
   need_root; detect_init; load_env
   [ -f "$ENV_FILE" ] || die "尚未安装"
-  local kv k v
+  local kv k v p
   for kv in "$@"; do
     k=${kv%%=*}; v=${kv#*=}
     case "$k" in
-      UUID|SNI|CFIP|CFPORT|NAME|ARGO_DOMAIN|ARGO_TOKEN|PROTOCOLS) printf -v "$k" '%s' "$v" ;;
+      PROTOCOLS) for p in ${v//,/ }; do [[ ",$ALL_PROTOCOLS," == *",$p,"* ]] || die "未知协议：$p"; done; PROTOCOLS=$v ;;
+      UUID|SNI|CFIP|CFPORT|NAME|ARGO_DOMAIN|ARGO_TOKEN) printf -v "$k" '%s' "$v" ;;
       PORT|ARGO_PORT) valid_port "$v" || die "端口无效：$v"; printf -v "$k" '%s' "$v" ;;
       *) die "不支持的设置：$k" ;;
     esac
   done
-  [ "$PORT" -le 65532 ] || die "起始端口最大 65532"
+  [ "$PORT" -le 65531 ] || die "起始端口最大 65531"
   if on argo && [ -n "${ARGO_TOKEN:-}" ] && [ -z "${ARGO_DOMAIN:-}" ]; then die "固定隧道需要 ARGO_DOMAIN"; fi
   apply
   info "已更新"
@@ -493,7 +501,7 @@ EOF
       4) do_set "UUID=$(cat /proc/sys/kernel/random/uuid)" ;;
       5) do_set "ARGO_TOKEN=$(ask "隧道 Token" "")" "ARGO_DOMAIN=$(ask "隧道域名" "${ARGO_DOMAIN:-}")" ;;
       6) do_set "ARGO_TOKEN=" "ARGO_DOMAIN=" ;;
-      7) do_set "PROTOCOLS=$(ask "协议（可选 $ALL_PROTOCOLS）" "${PROTOCOLS:-$ALL_PROTOCOLS}")" ;;
+      7) do_set "PROTOCOLS=$(ask "协议（可选 $ALL_PROTOCOLS）" "${PROTOCOLS:-$DEFAULT_PROTOCOLS}")" ;;
       8) do_restart ;;
       9) do_update ;;
       10) [ "$(ask "确认卸载？输入 y" "")" = y ] && do_uninstall ;;
