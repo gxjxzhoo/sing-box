@@ -111,7 +111,7 @@
                   <input class="x-input" id="port" type="number" inputmode="numeric" min="1" max="65535" />
                   <button type="button" class="btn" id="portBtn">随机</button>
                 </div>
-                <p class="x-hint">Reality=PORT，Hy2=+1，TUIC=+2，AnyTLS=+3，Socks5=+4，SS=+5，Trojan=+6，VMess=+7，ShadowTLS=+8</p>
+                <p class="x-hint">Hy2=PORT，Reality=+1，TUIC=+2，Trojan=+3，VMess=+4，SS=+5，AnyTLS=+6，ShadowTLS=+7，Socks5=+8</p>
               </div>
               <details class="x-details">
                 <summary>单独指定端口</summary>
@@ -154,6 +154,12 @@
                   <input class="x-input" id="argoDomain" type="text" spellcheck="false" placeholder="tunnel.example.com" />
                   <p class="x-err" id="domainErr"></p>
                 </div>
+              </div>
+              <div class="x-field">
+                <label for="argoPort">ARGO_PORT <small>可选，本地端口</small></label>
+                <input class="x-input" id="argoPort" type="number" inputmode="numeric" min="1" max="65535" placeholder="8001" />
+                <p class="x-hint">只监听 127.0.0.1；固定隧道在 Cloudflare 里填 HTTP → 127.0.0.1:此端口（路径留空）</p>
+                <p class="x-err" id="argoPortErr"></p>
               </div>
               <div class="x-field">
                 <label class="x-switch">Argo 订阅 <input type="checkbox" id="sub" checked role="switch" /></label>
@@ -211,7 +217,7 @@
                 <div class="links"><button type="button" class="btn" data-copy="cmd">复制</button></div>
               </div>
               <pre class="x-code" id="cmd"></pre>
-              <p class="x-warn" id="tokWarn" hidden>命令含隧道 Token，会留在 shell 历史里；可在命令前加一个空格，或运行后执行 history -c</p>
+              <p class="x-warn" id="tokWarn" hidden>命令已自动以空格开头，Debian/Ubuntu 默认不记入 shell 历史；其他系统运行后可执行 history -c</p>
               <p class="fineprint">需要 root；Alpine 先执行 apk add bash curl。可重复运行：已安装时保留原设置，命令里的参数优先。</p>
             </div>
             <div class="x-out__grid">
@@ -251,18 +257,18 @@
     <script>
       (function () {
         var P = [
-          { k: "hy2", n: "Hysteria2", off: 1, env: "HY2_PORT" },
-          { k: "reality", n: "VLESS-Reality", off: 0, env: "REALITY_PORT" },
           { k: "argo", n: "Argo 隧道" },
+          { k: "hy2", n: "Hysteria2", off: 0, env: "HY2_PORT" },
+          { k: "reality", n: "VLESS-Reality", off: 1, env: "REALITY_PORT" },
           { k: "tuic", n: "TUIC v5", off: 2, env: "TUIC_PORT" },
-          { k: "trojan", n: "Trojan (TLS)", off: 6, env: "TROJAN_PORT" },
-          { k: "vmess", n: "VMess-WS", off: 7, env: "VMESS_PORT" },
+          { k: "trojan", n: "Trojan (TLS)", off: 3, env: "TROJAN_PORT" },
+          { k: "vmess", n: "VMess-WS", off: 4, env: "VMESS_PORT" },
           { k: "ss", n: "Shadowsocks-2022", off: 5, env: "SS_PORT" },
-          { k: "anytls", n: "AnyTLS", off: 3, env: "ANYTLS_PORT" },
-          { k: "shadowtls", n: "ShadowTLS v3", off: 8, env: "SHADOWTLS_PORT" },
-          { k: "socks", n: "Socks5", off: 4, env: "SOCKS_PORT" }
+          { k: "anytls", n: "AnyTLS", off: 6, env: "ANYTLS_PORT" },
+          { k: "shadowtls", n: "ShadowTLS v3", off: 7, env: "SHADOWTLS_PORT" },
+          { k: "socks", n: "Socks5", off: 8, env: "SOCKS_PORT" }
         ];
-        var DEF = ["hy2", "argo"];
+        var DEF = ["argo", "hy2", "reality"];
         var SCRIPT = "bash <(curl -fsSL https://raw.githubusercontent.com/gxjxzhoo/sing-box/main/sb.sh) install </dev/null";
         var UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
         var $ = function (id) { return document.getElementById(id); };
@@ -364,12 +370,23 @@
           $("domainErr").textContent = domBad ? "固定隧道需要填写 ARGO_DOMAIN" : "";
           if (domBad) ok = false;
 
+          // argo port
+          var ap = val("argoPort"), apErr = "";
+          if (argo && ap) {
+            if (!validPort(ap)) apErr = "ARGO_PORT 须为 1–65535";
+            else if (used[+ap]) apErr = "端口冲突：Argo 与 " + used[+ap].join("、") + " 都使用 " + ap;
+          }
+          $("argoPort").classList.toggle("is-bad", !!apErr);
+          $("argoPortErr").textContent = apErr;
+          if (apErr) ok = false;
+
           // command
           var env = [["PROTOCOLS", sel.map(function (p) { return p.k; }).join(",")], ["PORT", base], ["UUID", u]];
           sel.forEach(function (p) { if (p.env && p.inp.value.trim()) env.push([p.env, p.inp.value.trim()]); });
           var tok = "";
           if (argo) {
             env.push(["ARGO_PROTO", $("argoProto").value]);
+            if (ap) env.push(["ARGO_PORT", ap]);
             if (fixed) {
               tok = val("argoToken");
               if (tok) env.push(["ARGO_TOKEN", tok]);
@@ -386,7 +403,7 @@
 
           var cmd = $("cmd"), btn = document.querySelector('[data-copy="cmd"]');
           if (ok) {
-            cmd.textContent = env.map(function (e) { return e[0] + "=" + q(e[1]); }).join(" ") + " " + SCRIPT;
+            cmd.textContent = (tok ? " " : "") + env.map(function (e) { return e[0] + "=" + q(e[1]); }).join(" ") + " " + SCRIPT;
             cmd.classList.remove("is-off");
             btn.disabled = false;
           } else {
