@@ -31,6 +31,6 @@ sb set PROTOCOLS=reality,hy2    # 只开部分协议
 sb restart | status | update | upgrade | uninstall   # upgrade=更新脚本本身
 ```
 
-固定隧道：在 Cloudflare Zero Trust 把域名的 Public Hostname 指向 `http://localhost:<ARGO_PORT>`（`sb nodes` 会提示端口）。
+固定隧道：在 Cloudflare Zero Trust 把域名的 Public Hostname 设为 HTTP → `127.0.0.1:8001`（ARGO_PORT 默认 8001，路径留空；`sb nodes` 会自检）。
 
 旧版模块化脚本仍在 `sb/` 目录。
