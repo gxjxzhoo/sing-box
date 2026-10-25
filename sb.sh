@@ -13,7 +13,7 @@
 # 安装时可用的环境变量：
 #   PORT        直连起始端口（Reality=PORT，Hy2=+1，TUIC=+2，AnyTLS=+3，Socks5=+4，SS=+5，Trojan=+6，VMess=+7，ShadowTLS=+8；默认随机）
 #   REALITY_PORT/HY2_PORT/TUIC_PORT/ANYTLS_PORT/SOCKS_PORT/SS_PORT/TROJAN_PORT/VMESS_PORT/SHADOWTLS_PORT  单独指定某协议端口（留空=按 PORT 推算）
-#   PROTOCOLS   要启用的协议，逗号分隔，默认 reality,hy2,tuic,anytls,argo；可加 socks,ss,trojan,vmess,shadowtls
+#   PROTOCOLS   要启用的协议，逗号分隔，默认 argo,hy2,reality；可加 tuic,trojan,vmess,ss,anytls,shadowtls,socks
 #   ARGO_PROTO  Argo 隧道里跑的协议：vless（默认）/vmess/trojan
 #   UUID        默认随机
 #   SNI         Reality 偷取的站点，默认 www.iij.ad.jp
@@ -30,7 +30,7 @@
 set -o pipefail
 export LANG=en_US.UTF-8
 
-SCRIPT_VERSION="3.7.5"
+SCRIPT_VERSION="3.7.6"
 DIR=/etc/sing-box
 ENV_FILE=$DIR/sb.env
 CONF=$DIR/config.json
@@ -40,9 +40,9 @@ BIN_CF=$DIR/cloudflared
 SELF=/usr/local/bin/sb
 SYSCTL_FILE=/etc/sysctl.d/99-sing-box.conf
 SCRIPT_URL=${SCRIPT_URL:-https://raw.githubusercontent.com/gxjxzhoo/sing-box/main/sb.sh}
-ALL_PROTOCOLS="hy2,reality,argo,tuic,trojan,vmess,ss,anytls,shadowtls,socks"  # 按热度排序（菜单字母 a-j 即此顺序）
+ALL_PROTOCOLS="argo,hy2,reality,tuic,trojan,vmess,ss,anytls,shadowtls,socks"  # 按热度排序（菜单字母 a-j 即此顺序）
 DIRECT="hy2 reality tuic trojan vmess ss anytls shadowtls socks"
-DEFAULT_PROTOCOLS="reality,hy2,tuic,anytls,argo"
+DEFAULT_PROTOCOLS="argo,hy2,reality"
 
 # ---------- 输出 ----------
 c() { printf '\033[%sm%s\033[0m\n' "$1" "$2"; }
@@ -579,7 +579,7 @@ do_install() {
 
   if [ -z "${PROTOCOLS:-}" ] && [ -t 0 ]; then
     PROTOCOLS=$DEFAULT_PROTOCOLS
-    PROTOCOLS=$(pick_protocols "默认 abcdh") || exit 1
+    PROTOCOLS=$(pick_protocols "默认 abc") || exit 1
   fi
   PROTOCOLS=${PROTOCOLS:-$DEFAULT_PROTOCOLS}
   UUID=${UUID:-$(cat /proc/sys/kernel/random/uuid)}
@@ -729,7 +729,7 @@ port_menu() {
 
 # 协议选择：字母 a-j（也接受数字 1-10），可连写 abce 或用空格/逗号分隔；输出逗号列表，回车输出空
 pick_protocols() {
-  local all=(${ALL_PROTOCOLS//,/ }) desc=("Hysteria2" "VLESS-Reality" "Argo 隧道（${ARGO_PROTO:-vless}-WS）" "TUIC v5" "Trojan（TLS）" "VMess-WS" "Shadowsocks-2022" "AnyTLS" "ShadowTLS v3" "Socks5")
+  local all=(${ALL_PROTOCOLS//,/ }) desc=("Argo 隧道（${ARGO_PROTO:-vless}-WS）" "Hysteria2" "VLESS-Reality" "TUIC v5" "Trojan（TLS）" "VMess-WS" "Shadowsocks-2022" "AnyTLS" "ShadowTLS v3" "Socks5")
   local L=abcdefghij i n sel="" tok idx
   if [ -f "$ENV_FILE" ]; then echo "  ［✓］= 当前已安装" >&2; else echo "  ［✓］= 默认选中" >&2; fi
   for i in "${!all[@]}"; do
