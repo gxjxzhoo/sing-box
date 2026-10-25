@@ -8,7 +8,7 @@
 #   bash sb.sh install      安装（可用环境变量免交互，见下）
 #   bash sb.sh nodes        查看节点
 #   bash sb.sh set KEY=VAL  修改设置并重建（如 UUID=... PORT=... HY2_PORT=... ARGO_TOKEN=...）
-#   bash sb.sh restart|status|update|uninstall
+#   bash sb.sh restart|status|update|upgrade|uninstall   （upgrade=更新本脚本）
 #
 # 安装时可用的环境变量：
 #   PORT        直连起始端口（Reality=PORT，Hy2=+1，TUIC=+2，AnyTLS=+3，Socks5=+4，SS=+5，Trojan=+6，VMess=+7，ShadowTLS=+8；默认随机）
@@ -25,11 +25,12 @@
 #   NAME        节点名前缀，默认主机名
 #   IP_MODE     节点用哪个 IP：auto（优先 v4）/4/6/both，默认 auto
 #   SB_VERSION  固定 sing-box 版本（需 ≥1.12，如 1.12.9），默认最新正式版
+#   TUNE        1 开启 BBR+fq 与 UDP 缓冲调优（默认）/0 不改内核参数
 # Alpine 需先 apk add bash curl
 set -o pipefail
 export LANG=en_US.UTF-8
 
-SCRIPT_VERSION="3.6.1"
+SCRIPT_VERSION="3.7.0"
 DIR=/etc/sing-box
 ENV_FILE=$DIR/sb.env
 CONF=$DIR/config.json
@@ -37,9 +38,10 @@ NODES=$DIR/nodes.txt
 BIN_SB=$DIR/sing-box
 BIN_CF=$DIR/cloudflared
 SELF=/usr/local/bin/sb
+SYSCTL_FILE=/etc/sysctl.d/99-sing-box.conf
 SCRIPT_URL=${SCRIPT_URL:-https://raw.githubusercontent.com/gxjxzhoo/sing-box/main/sb.sh}
-ALL_PROTOCOLS="reality,hy2,tuic,anytls,argo,socks,ss,trojan,vmess,shadowtls"
-DIRECT="reality hy2 tuic anytls socks ss trojan vmess shadowtls"
+ALL_PROTOCOLS="hy2,reality,argo,tuic,trojan,vmess,ss,anytls,shadowtls,socks"  # 按热度排序（菜单字母 a-j 即此顺序）
+DIRECT="hy2 reality tuic trojan vmess ss anytls shadowtls socks"
 DEFAULT_PROTOCOLS="reality,hy2,tuic,anytls,argo"
 
 # ---------- 输出 ----------
@@ -103,6 +105,16 @@ port_free() {
   else return 0; fi
 }
 
+rand_base() { # 找一个起始端口，使 PORT..PORT+8 都空闲（各协议按偏移推算时不撞端口）
+  local p i k ok
+  for i in $(seq 1 50); do
+    p=$(( (RANDOM << 15 | RANDOM) % 50000 + 10000 )); ok=1
+    for k in 0 1 2 3 4 5 6 7 8; do port_free $((p + k)) || { ok=0; break; }; done
+    [ "$ok" = 1 ] && { echo "$p"; return; }
+  done
+  die "找不到空闲端口"
+}
+
 valid_uuid() { [[ "$1" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]; }
 valid_port() { [[ "$1" =~ ^[0-9]+$ ]] && [ "$1" -ge 1 ] && [ "$1" -le 65535 ]; }
 
@@ -130,7 +142,7 @@ save_env() {
   local k
   umask 077
   {
-    for k in UUID PORT $PORT_KEYS PROTOCOLS IP_MODE SNI ARGO_PORT ARGO_TOKEN ARGO_DOMAIN CFIP CFPORT NAME \
+    for k in UUID PORT $PORT_KEYS PROTOCOLS IP_MODE SNI ARGO_PORT ARGO_TOKEN ARGO_DOMAIN CFIP CFPORT NAME TUNE \
              REALITY_PRIVATE REALITY_PUBLIC REALITY_SID SS_PASSWORD STLS_INNER_PORT ARGO_PROTO SUB SUB_TOKEN SUB_PORT SB_VERSION; do
       printf '%s=%q\n' "$k" "${!k:-}"
     done
@@ -321,8 +333,8 @@ build_config() {
 }
 
 # ---------- 服务（systemd / OpenRC 共用）----------
-write_service() { # 名称 描述 命令 [环境文件]
-  local name=$1 desc=$2 cmd=$3 envf=${4:-}
+write_service() { # 名称 描述 命令 [环境文件] [启动后执行]
+  local name=$1 desc=$2 cmd=$3 envf=${4:-} post=${5:-}
   if [ "$INIT" = systemd ]; then
     cat > "/etc/systemd/system/$name.service" <<EOF
 [Unit]
@@ -333,6 +345,7 @@ Wants=network-online.target
 [Service]
 ${envf:+EnvironmentFile=$envf}
 ExecStart=$cmd
+${post:+ExecStartPost=-/bin/sh -c '($post) >/dev/null 2>&1 &'}
 Restart=on-failure
 RestartSec=5
 LimitNOFILE=1048576
@@ -359,6 +372,7 @@ output_log="$DIR/$name.log"
 error_log="$DIR/$name.log"
 depend() { need net; }
 start_pre() { ${envf:+set -a; . $envf; set +a;} :; }
+start_post() { ${post:+($post) >/dev/null 2>&1 &} :; }
 EOF
     chmod 755 "/etc/init.d/$name"
     rc-update add "$name" default >/dev/null 2>&1
@@ -384,8 +398,11 @@ remove_service() {
   fi
 }
 
+svc_sig() { cat "/etc/systemd/system/$1.service" "/etc/init.d/$1" "$DIR/argo.env" "$DIR/argo.yml" 2>/dev/null | cksum; }
+
 setup_argo_service() {
-  if ! on argo; then remove_service sb-argo 2>/dev/null; rm -f "$DIR/argo.env"; return; fi
+  if ! on argo; then remove_service sb-argo 2>/dev/null; rm -f "$DIR/argo.env" "$DIR/argo.yml"; return; fi
+  local before; before=$(svc_sig sb-argo)
   [ -x "$BIN_CF" ] || install_cloudflared
   local cmd="$BIN_CF tunnel --no-autoupdate --edge-ip-version auto --protocol http2"
   if [ -n "${ARGO_TOKEN:-}" ]; then
@@ -399,8 +416,11 @@ setup_argo_service() {
         "$SUB_TOKEN" "$SUB_PORT" "$ARGO_PORT" > "$DIR/argo.yml" )
       cmd="$cmd --config $DIR/argo.yml"
     else rm -f "$DIR/argo.yml"; fi
-    write_service sb-argo "Cloudflare Tunnel (sing-box)" "$cmd --url http://127.0.0.1:$ARGO_PORT"
+    # 临时隧道每次启动（含开机）域名都会变：启动后自动刷新节点和订阅内容
+    write_service sb-argo "Cloudflare Tunnel (sing-box)" "$cmd --url http://127.0.0.1:$ARGO_PORT" "" "sleep 5; $SELF nodes"
   fi
+  # 隧道配置没变且在运行就不重启：临时隧道一重启就换域名
+  if [ "$before" = "$(svc_sig sb-argo)" ] && svc_active sb-argo; then return; fi
   : > "$DIR/sb-argo.log"
   svc restart sb-argo
 }
@@ -417,7 +437,7 @@ open_ports() {
   on trojan && tcp+=("$(pt trojan)")
   on vmess && tcp+=("$(pt vmess)")
   on shadowtls && tcp+=("$(pt shadowtls)")
-  if has ufw && ufw status 2>/dev/null | grep -q active; then
+  if has ufw && ufw status 2>/dev/null | grep -q "^Status: active"; then
     for p in "${tcp[@]}"; do ufw allow "$p/tcp" >/dev/null; done
     for p in "${udp[@]}"; do ufw allow "$p/udp" >/dev/null; done
   elif has firewall-cmd && firewall-cmd --state >/dev/null 2>&1; then
@@ -452,15 +472,15 @@ show_nodes() {
   {
    while read -r ip sfx; do
     n="$nn$sfx"
-    on reality && echo "vless://$UUID@$ip:$(pt reality)?encryption=none&flow=xtls-rprx-vision&security=reality&sni=$SNI&fp=chrome&pbk=$REALITY_PUBLIC&sid=$REALITY_SID&type=tcp#$n-reality"
     on hy2     && echo "hysteria2://$UUID@$ip:$(pt hy2)?sni=www.bing.com&alpn=h3&insecure=1#$n-hy2"
+    on reality && echo "vless://$UUID@$ip:$(pt reality)?encryption=none&flow=xtls-rprx-vision&security=reality&sni=$SNI&fp=chrome&pbk=$REALITY_PUBLIC&sid=$REALITY_SID&type=tcp#$n-reality"
     on tuic    && echo "tuic://$UUID:$UUID@$ip:$(pt tuic)?sni=www.bing.com&alpn=h3&congestion_control=bbr&udp_relay_mode=native&allow_insecure=1#$n-tuic"
-    on anytls  && echo "anytls://$UUID@$ip:$(pt anytls)?sni=www.bing.com&insecure=1#$n-anytls"
-    on socks   && echo "socks5://${UUID%%-*}:$UUID@$ip:$(pt socks)#$n-socks5"
-    on ss      && echo "ss://$(b64 "2022-blake3-aes-128-gcm:$SS_PASSWORD")@$ip:$(pt ss)#$n-ss"
     on trojan  && echo "trojan://$UUID@$ip:$(pt trojan)?security=tls&sni=www.bing.com&allowInsecure=1&type=tcp#$n-trojan"
     on vmess   && echo "vmess://$(vmess_b64 "${NAME}$sfx-vmess" "${ip//[\[\]]/}" "$(pt vmess)" "" "/vmess?ed=2560" "")"
+    on ss      && echo "ss://$(b64 "2022-blake3-aes-128-gcm:$SS_PASSWORD")@$ip:$(pt ss)#$n-ss"
+    on anytls  && echo "anytls://$UUID@$ip:$(pt anytls)?sni=www.bing.com&insecure=1#$n-anytls"
     on shadowtls && echo "ss://$(b64 "2022-blake3-aes-128-gcm:$SS_PASSWORD")@$ip:$(pt shadowtls)?shadow-tls=$(b64 "{\"version\":\"3\",\"host\":\"www.bing.com\",\"password\":\"$UUID\"}")#$n-shadowtls"
+    on socks   && echo "socks5://${UUID%%-*}:$UUID@$ip:$(pt socks)#$n-socks5"
    done <<<"$ips"
     n=$nn
     if on argo; then
@@ -475,8 +495,8 @@ show_nodes() {
         warn "未获取到 Argo 域名，稍后执行 sb nodes 再试" >&2
       fi
     fi
-  } > "$NODES.new"
-  mv -f "$NODES.new" "$NODES"; chmod 600 "$NODES"
+  } > "$NODES.$$"
+  chmod 600 "$NODES.$$"; mv -f "$NODES.$$" "$NODES"
   if sub_on && [ -d "$DIR/sub/$SUB_TOKEN" ]; then
     { base64 -w0 "$NODES" 2>/dev/null || base64 "$NODES" | tr -d '\n'; } > "$DIR/sub/$SUB_TOKEN/sub"
     cp -f "$NODES" "$DIR/sub/$SUB_TOKEN/raw"
@@ -497,8 +517,25 @@ show_nodes() {
 }
 
 # ---------- 主要操作 ----------
+trim_logs() { local f; for f in "$DIR"/*.log; do [ -f "$f" ] && [ "$(wc -c <"$f")" -gt 5242880 ] && : > "$f"; done; return 0; }
+
+tune_sysctl() { # BBR+fq（TCP 协议提速）与更大的 UDP 缓冲（Hy2/TUIC 的 QUIC 吞吐）
+  [ "${TUNE:-1}" = 0 ] && { rm -f "$SYSCTL_FILE"; return 0; }
+  [ -f "$SYSCTL_FILE" ] && return 0
+  mkdir -p "${SYSCTL_FILE%/*}"; local f=$SYSCTL_FILE.new
+  : > "$f"
+  if grep -qw bbr /proc/sys/net/ipv4/tcp_available_congestion_control 2>/dev/null || modprobe tcp_bbr 2>/dev/null; then
+    printf 'net.core.default_qdisc=fq\nnet.ipv4.tcp_congestion_control=bbr\n' >> "$f"
+  fi
+  printf 'net.core.rmem_max=16777216\nnet.core.wmem_max=16777216\n' >> "$f"
+  mv -f "$f" "$SYSCTL_FILE"
+  sysctl -q -p "$SYSCTL_FILE" >/dev/null 2>&1 || warn "内核参数未完全生效（容器/OpenVZ 常见），不影响使用"
+  return 0
+}
+
 apply() { # 生成配置并（重）启动
   save_env
+  trim_logs; tune_sysctl
   ensure_keys; save_env
   build_config
   write_service sing-box "sing-box" "$BIN_SB run -c $CONF"
@@ -514,7 +551,7 @@ do_install() {
   if [ -f "$ENV_FILE" ]; then
     warn "检测到已安装，将保留现有设置重新安装（命令行传入的变量优先）"
     local k ov=()
-    for k in UUID PORT $PORT_KEYS PROTOCOLS IP_MODE ARGO_PROTO SUB SNI ARGO_PORT ARGO_TOKEN ARGO_DOMAIN CFIP CFPORT NAME SB_VERSION; do
+    for k in UUID PORT $PORT_KEYS PROTOCOLS IP_MODE ARGO_PROTO SUB SNI ARGO_PORT ARGO_TOKEN ARGO_DOMAIN CFIP CFPORT NAME SB_VERSION TUNE; do
       [ -n "${!k+x}" ] && ov+=("$k=${!k}")
     done
     load_env
@@ -525,7 +562,7 @@ do_install() {
 
   if [ -z "${PROTOCOLS:-}" ] && [ -t 0 ]; then
     PROTOCOLS=$DEFAULT_PROTOCOLS
-    PROTOCOLS=$(pick_protocols "默认 abcde") || exit 1
+    PROTOCOLS=$(pick_protocols "默认 abcdh") || exit 1
   fi
   PROTOCOLS=${PROTOCOLS:-$DEFAULT_PROTOCOLS}
   UUID=${UUID:-$(cat /proc/sys/kernel/random/uuid)}
@@ -537,7 +574,7 @@ do_install() {
   if [ -z "${PORT:-}" ] && [ -t 0 ]; then
     # 交互安装：逐个询问已选直连协议的端口，回车随机
     local x v pk
-    PORT=$(rand_port)
+    PORT=$(rand_base)
     for x in $DIRECT; do
       on "$x" || continue
       pk="$(tr a-z A-Z <<<"$x")_PORT"
@@ -550,7 +587,7 @@ do_install() {
       printf -v "$pk" '%s' "$v"
     done
   fi
-  PORT=${PORT:-$(rand_port)}
+  PORT=${PORT:-$(rand_base)}
   valid_port "$PORT" || die "端口无效：$PORT"
   ARGO_PORT=${ARGO_PORT:-$(rand_port)}
   check_ports
@@ -598,6 +635,7 @@ do_set() { # KEY=VAL ...
       PROTOCOLS) for p in ${v//,/ }; do [[ ",$ALL_PROTOCOLS," == *",$p,"* ]] || die "未知协议：$p"; done; PROTOCOLS=$v ;;
       ARGO_PROTO) case "$v" in vless|vmess|trojan) ARGO_PROTO=$v ;; *) die "ARGO_PROTO 只能是 vless/vmess/trojan" ;; esac ;;
       SUB) case "$v" in 0|1) SUB=$v ;; *) die "SUB 只能是 0 或 1" ;; esac ;;
+      TUNE) case "$v" in 0|1) TUNE=$v; rm -f "$SYSCTL_FILE" ;; *) die "TUNE 只能是 0 或 1" ;; esac ;;
       SUB_TOKEN) [ -n "$v" ] || v=$(openssl rand -hex 12); [[ "$v" =~ ^[A-Za-z0-9_-]{8,64}$ ]] || die "SUB_TOKEN 需 8-64 位字母数字"; rm -rf "$DIR/sub"; SUB_TOKEN=$v ;;
       IP_MODE) case "$v" in auto|4|6|both) IP_MODE=$v ;; *) die "IP_MODE 只能是 auto/4/6/both" ;; esac ;;
       UUID) valid_uuid "$v" || die "UUID 格式不对：$v"; UUID=$v ;;
@@ -625,6 +663,15 @@ do_update() {
   info "已更新到：$("$BIN_SB" version | head -1)"
 }
 
+do_upgrade() { # 更新本脚本：下载 → 语法检查 → 替换，不改配置
+  need_root
+  local t; t=$(mktemp)
+  curl -fsSL -m 30 -o "$t" "$SCRIPT_URL" || { rm -f "$t"; die "下载脚本失败"; }
+  bash -n "$t" || { rm -f "$t"; die "新脚本语法错误，已放弃"; }
+  install -m 700 "$t" "$SELF"; rm -f "$t"
+  info "脚本已更新：v$SCRIPT_VERSION → v$(sed -n 's/^SCRIPT_VERSION="\(.*\)"/\1/p' "$SELF")"
+}
+
 do_restart() { need_root; detect_init; load_env; svc restart sing-box; on argo && svc restart sb-argo; do_status; }
 
 do_status() {
@@ -640,6 +687,7 @@ do_uninstall() {
   need_root; detect_init
   remove_service sb-argo; remove_service sing-box
   [ "$(readlink /usr/bin/sb 2>/dev/null)" = "$SELF" ] && rm -f /usr/bin/sb
+  rm -f "$SYSCTL_FILE"
   rm -rf "$DIR" "$SELF"
   info "已卸载（防火墙规则如有需要请手动删除）"
 }
@@ -661,10 +709,11 @@ port_menu() {
   esac
 }
 
-# 协议选择：字母 a-f（也接受数字 1-6），可连写 abce 或用空格/逗号分隔；输出逗号列表，回车输出空
+# 协议选择：字母 a-j（也接受数字 1-10），可连写 abce 或用空格/逗号分隔；输出逗号列表，回车输出空
 pick_protocols() {
-  local all=(${ALL_PROTOCOLS//,/ }) desc=("VLESS-Reality" "Hysteria2" "TUIC v5" "AnyTLS" "Argo 隧道（${ARGO_PROTO:-vless}-WS）" "Socks5" "Shadowsocks-2022" "Trojan（TLS）" "VMess-WS" "ShadowTLS v3")
+  local all=(${ALL_PROTOCOLS//,/ }) desc=("Hysteria2" "VLESS-Reality" "Argo 隧道（${ARGO_PROTO:-vless}-WS）" "TUIC v5" "Trojan（TLS）" "VMess-WS" "Shadowsocks-2022" "AnyTLS" "ShadowTLS v3" "Socks5")
   local L=abcdefghij i n sel="" tok idx
+  if [ -f "$ENV_FILE" ]; then echo "  [x] = 当前已安装" >&2; else echo "  [x] = 默认选中" >&2; fi
   for i in "${!all[@]}"; do
     if on "${all[$i]}"; then tok="[x]"; else tok="[ ]"; fi
     printf '  %s. %s %s\n' "${L:$i:1}" "$tok" "${desc[$i]}" >&2
@@ -709,10 +758,12 @@ menu() {
  7. 选择协议           8. 重启
  9. 更新内核           10. 卸载
 11. 节点 IPv4/IPv6     12. Argo 协议
-13. Argo 订阅
+13. Argo 订阅          14. 更新脚本
  0. 退出
 EOF
-    case "$(ask "请选择" "")" in
+    x=$(ask "请选择" "")
+    [ "$x" = 0 ] && exit 0
+    ( case "$x" in
       1) do_install ;;
       2) show_nodes ;;
       3) port_menu ;;
@@ -731,9 +782,9 @@ EOF
           case "$(ask "1 开启  2 关闭  3 更换订阅令牌" "")" in
             1) do_set SUB=1 ;; 2) do_set SUB=0 ;; 3) do_set SUB_TOKEN= ;;
           esac ;;
-      0) exit 0 ;;
+      14) do_upgrade ;;
       *) warn "无效选项" ;;
-    esac
+    esac )  # 子 shell：某项出错只返回菜单，不退出
     load_env
   done
 }
@@ -745,6 +796,7 @@ case "${1:-menu}" in
   restart)   do_restart ;;
   status)    do_status ;;
   update)    do_update ;;
+  upgrade)   do_upgrade ;;
   uninstall) do_uninstall ;;
   menu)      need_root; menu ;;
   -h|--help|help) awk 'NR>1 && /^#/ {sub(/^# ?/,""); print; next} NR>1 {exit}' "$0" ;;
