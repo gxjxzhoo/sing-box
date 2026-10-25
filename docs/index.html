@@ -125,15 +125,7 @@
             </div>
 
             <div class="x-panel" id="argoPanel">
-              <h3>4. Argo 隧道</h3>
-              <div class="x-field">
-                <label for="argoProto">ARGO_PROTO</label>
-                <select class="x-input" id="argoProto">
-                  <option value="vless" selected>vless</option>
-                  <option value="vmess">vmess</option>
-                  <option value="trojan">trojan</option>
-                </select>
-              </div>
+              <h3>4. Argo 隧道 <small>（VLESS/VMess/Trojan 全部输出）</small></h3>
               <div class="x-field">
                 <span class="x-label">隧道类型</span>
                 <div class="x-radios" role="radiogroup" aria-label="隧道类型">
@@ -385,7 +377,6 @@
           sel.forEach(function (p) { if (p.env && p.inp.value.trim()) env.push([p.env, p.inp.value.trim()]); });
           var tok = "";
           if (argo) {
-            env.push(["ARGO_PROTO", $("argoProto").value]);
             if (ap) env.push(["ARGO_PORT", ap]);
             if (fixed) {
               tok = val("argoToken");
