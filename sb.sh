@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # sing-box 一键脚本（单文件重写版）
-# 入站：VLESS-Reality / Hysteria2 / TUIC v5 / AnyTLS / Socks5 / SS-2022 / Trojan / VMess-WS / ShadowTLS（直连）+ VLESS-WS（Cloudflare Argo 隧道）
+# 入站：VLESS-Reality / Hysteria2 / TUIC v5 / AnyTLS / Socks5 / SS-2022 / Trojan / VMess-WS / ShadowTLS（直连）+ VLESS/VMess/Trojan-WS（Cloudflare Argo 隧道）+ 可选 WARP 出站
 # 支持：Debian/Ubuntu/CentOS/RHEL/Alpine，systemd 或 OpenRC；amd64/arm64/armv7/386
 #
 # 用法：
@@ -33,7 +33,7 @@
 set -o pipefail
 export LANG=en_US.UTF-8
 
-SCRIPT_VERSION="3.10.0"
+SCRIPT_VERSION="3.10.1"
 DIR=/etc/sing-box
 ENV_FILE=$DIR/sb.env
 CONF=$DIR/config.json
@@ -121,10 +121,16 @@ rand_base() { # 找一个起始端口，使 PORT..PORT+8 都空闲（各协议�
 valid_uuid() { [[ "$1" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]; }
 valid_port() { [[ "$1" =~ ^[0-9]+$ ]] && [ "$1" -ge 1 ] && [ "$1" -le 65535 ]; }
 
-ip4() { local u ip; for u in https://api.ipify.org https://ipv4.icanhazip.com https://ifconfig.co; do
-  ip=$(curl -4 -fsS -m 5 "$u" 2>/dev/null | tr -d '[:space:]') && [ -n "$ip" ] && { echo "$ip"; return; }; done; }
-ip6() { local u ip; for u in https://api64.ipify.org https://ipv6.icanhazip.com https://ifconfig.co; do
-  ip=$(curl -6 -fsS -m 5 "$u" 2>/dev/null | tr -d '[:space:]') && [[ "$ip" == *:* ]] && { echo "[$ip]"; return; }; done; }
+pub_ip() { # 4|6 → 公网地址（v6 带方括号）
+  local u ip
+  for u in https://api64.ipify.org https://icanhazip.com https://ifconfig.co; do
+    ip=$(curl -"$1" -fsS -m 5 "$u" 2>/dev/null | tr -d '[:space:]') || continue
+    if [ "$1" = 6 ]; then [[ "$ip" == *:* ]] && { echo "[$ip]"; return; }
+    else [[ "$ip" =~ ^[0-9.]+$ ]] && { echo "$ip"; return; }; fi
+  done
+}
+ip4() { pub_ip 4; }
+ip6() { pub_ip 6; }
 
 node_ips() { # 按 IP_MODE 输出“地址 后缀”：auto=优先 v4，4/6=只用该版本，both=两个都出
   local a b
@@ -306,17 +312,21 @@ ensure_keys() {
   fi
   [ -n "${REALITY_SID:-}" ] || REALITY_SID=$(openssl rand -hex 8)
   [ -n "${SS_PASSWORD:-}" ] || SS_PASSWORD=$(openssl rand -base64 16)
-  [ -n "${STLS_INNER_PORT:-}" ] || STLS_INNER_PORT=$(rand_port)
   [ -n "${SUB_TOKEN:-}" ] || SUB_TOKEN=$(openssl rand -hex 12)
-  [ -n "${SUB_PORT:-}" ] || SUB_PORT=$(rand_port)
-  [ -n "${ARGO_IN_PORT:-}" ] || ARGO_IN_PORT=$(rand_port)
+  # 内部端口（只听本机）随机，并避开已设置的协议端口
+  local x used=" $ARGO_PORT "; for x in $DIRECT; do used+="$(pt "$x") "; done
+  for x in STLS_INNER_PORT SUB_PORT ARGO_IN_PORT; do [ -n "${!x:-}" ] && used+="${!x} $((${!x} + 1)) $((${!x} + 2)) "; done
+  for x in STLS_INNER_PORT SUB_PORT ARGO_IN_PORT; do
+    [ -n "${!x:-}" ] && continue
+    local p; while :; do p=$(rand_port); [[ "$used" == *" $p "* || "$used" == *" $((p + 1)) "* || "$used" == *" $((p + 2)) "* ]] || break; done
+    used+="$p $((p + 1)) $((p + 2)) "; printf -v "$x" '%s' "$p"
+  done
 }
 
-# Argo 隧道协议（可多选）：协议 → WS 路径 / 内部端口偏移
+# Argo 三个协议 → WS 路径 / 内部端口（ARGO_IN_PORT 起连续三个）
 apath() { case "$1" in vless) echo /argo ;; vmess) echo /argo-vm ;; trojan) echo /argo-tr ;; esac; }
 aport() { case "$1" in vless) echo "$ARGO_IN_PORT" ;; vmess) echo $((ARGO_IN_PORT + 1)) ;; trojan) echo $((ARGO_IN_PORT + 2)) ;; esac; }
 
-# ---------- 生成配置 ----------
 # ---------- WARP 出站 ----------
 # ai 模式默认走 WARP 的域名后缀（解锁 ChatGPT/Claude/Gemini 与常见流媒体）
 WARP_AI="openai.com,chatgpt.com,oaistatic.com,oaiusercontent.com,sora.com,anthropic.com,claude.ai,claude.com,gemini.google.com,aistudio.google.com,generativelanguage.googleapis.com,ai.google.dev,notebooklm.google,perplexity.ai,grok.com,x.ai,netflix.com,netflix.net,nflxvideo.net,nflxext.com,nflximg.net,nflxso.net,disneyplus.com,disney-plus.net,dssott.com,bamgrid.com,hulu.com,hbomax.com,max.com,primevideo.com,aiv-cdn.net"
@@ -362,6 +372,7 @@ warp_route() { # 输出 route 对象
          {domain_suffix:($d|split(",")|map(select(. != ""))), outbound:"warp"}]} else {} end)'
 }
 
+# ---------- 生成配置 ----------
 build_config() {
   local hy2 tuic anytls socks tls inb='[]'
   hy2=$(pt hy2); tuic=$(pt tuic); anytls=$(pt anytls); socks=$(pt socks)
@@ -856,6 +867,7 @@ do_status() {
     [ "$s" != sing-box ] && ! on argo && continue
     if svc_active "$s"; then info "$s：运行中"; else err "$s：未运行"; fi
   done
+  warp_on && info "WARP：$(warp_name)"
 }
 
 do_uninstall() {
