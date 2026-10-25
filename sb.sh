@@ -31,7 +31,7 @@
 set -o pipefail
 export LANG=en_US.UTF-8
 
-SCRIPT_VERSION="3.9.3"
+SCRIPT_VERSION="3.9.4"
 DIR=/etc/sing-box
 ENV_FILE=$DIR/sb.env
 CONF=$DIR/config.json
@@ -880,13 +880,14 @@ argo_menu() {
   on argo || { warn "未启用 Argo，请先在「选择协议」里勾选"; return; }
   local t="临时隧道"; [ -n "${ARGO_TOKEN:-}" ] && t="固定隧道（$ARGO_DOMAIN）"
   echo "  隧道：$t   订阅：$(sub_on && echo 开启 || echo 关闭)"
-  printf '  %s\n' "1. 设置固定隧道" "2. 改回临时隧道" "3. 订阅开/关" "4. 更换订阅令牌" "5. 修改本地端口（当前 $ARGO_PORT）" "0. 返回"
+  printf '  %s\n' "1. 设置固定隧道" "2. 改回临时隧道" "3. 订阅开/关" "4. 更换订阅令牌" "5. 修改本地端口（当前 $ARGO_PORT）" "6. 修改优选地址/端口（当前 $CFIP:$CFPORT）" "0. 返回"
   case "$(ask "请选择" "")" in
     1) do_set "ARGO_TOKEN=$(ask "隧道 Token" "")" "ARGO_DOMAIN=$(ask "隧道域名" "${ARGO_DOMAIN:-}")" ;;
     2) do_set "ARGO_TOKEN=" "ARGO_DOMAIN=" ;;
     3) if sub_on; then do_set SUB=0; else do_set SUB=1; fi ;;
     4) do_set SUB_TOKEN= ;;
     5) argo_port_set ;;
+    6) do_set "CFIP=$(ask "优选地址（域名或 IP）" "$CFIP")" "CFPORT=$(ask "优选端口" "$CFPORT")" ;;
   esac
 }
 
