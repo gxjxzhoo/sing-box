@@ -113,7 +113,7 @@
                   <input class="x-input" id="port" type="number" inputmode="numeric" min="1" max="65535" />
                   <button type="button" class="btn" id="portBtn">随机</button>
                 </div>
-                <p class="x-hint">Hy2=PORT，Reality +1，TUIC +2，Trojan +3，VMess +4，SS +5，AnyTLS +6，ShadowTLS +7，Socks5 +8</p>
+                <p class="x-hint">已选的协议按 Hy2、Reality、TUIC、Trojan、VMess、SS、AnyTLS、ShadowTLS、Socks5 顺序从 PORT 起连续分配；单独指定的端口会被跳过</p>
               </div>
               <details class="x-details x-details--sub">
                 <summary>单独指定端口</summary>
@@ -333,9 +333,23 @@
           var base = val("port"), baseOk = okPort(base), errs = [], used = {}, anyDirect = false;
           mark("port", !baseOk);
           if (!baseOk) errs.push("起始端口须为 1–65535");
+          // derived ports: explicit ports and ARGO_PORT are taken, the rest fill from PORT in order, skipping taken ones
+          var taken = {}, derived = {}, apv = val("argoPort");
+          P.forEach(function (p) {
+            if (p.env && p.cb.checked && okPort(p.inp.value.trim())) taken[+p.inp.value.trim()] = 1;
+          });
+          if (argo && okPort(apv)) taken[+apv] = 1;
+          if (baseOk) {
+            var n = +base;
+            P.forEach(function (p) {
+              if (!p.env || !p.cb.checked || p.inp.value.trim()) return;
+              while (taken[n]) n++;
+              derived[p.k] = n++;
+            });
+          }
           P.forEach(function (p) {
             if (!p.env) return;
-            var on = p.cb.checked, def = baseOk ? +base + p.off : 0, s = p.inp.value.trim(), eff;
+            var on = p.cb.checked, def = derived[p.k] || 0, s = p.inp.value.trim(), eff;
             p.box.hidden = !on;
             p.inp.placeholder = !def ? "" : def > 65535 ? "超出范围" : String(def);
             p.inp.classList.remove("is-bad");
