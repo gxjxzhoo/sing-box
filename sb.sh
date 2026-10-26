@@ -11,7 +11,7 @@
 #   bash sb.sh restart|status|update|upgrade|uninstall   （upgrade=更新本脚本）
 #
 # 安装时可用的环境变量：
-#   PORT        直连起始端口（Hy2=PORT，Reality=+1，TUIC=+2，Trojan=+3，VMess=+4，SS=+5，AnyTLS=+6，ShadowTLS=+7，Socks5=+8；默认随机）
+#   PORT        直连起始端口：已启用的协议按 Hy2/Reality/TUIC/Trojan/VMess/SS/AnyTLS/ShadowTLS/Socks5 顺序从 PORT 起连续分配（默认随机）
 #   HY2_PORT/REALITY_PORT/TUIC_PORT/TROJAN_PORT/VMESS_PORT/SS_PORT/ANYTLS_PORT/SHADOWTLS_PORT/SOCKS_PORT  单独指定某协议端口（留空=按 PORT 推算）
 #   PROTOCOLS   要启用的协议，逗号分隔，默认 argo,hy2,reality；可加 tuic,trojan,vmess,ss,anytls,shadowtls,socks
 #   Argo        同时输出 vless/vmess/trojan 三个节点；本地 Nginx 只听 127.0.0.1:ARGO_PORT 按路径分流，订阅同端口
@@ -33,7 +33,7 @@
 set -o pipefail
 export LANG=en_US.UTF-8
 
-SCRIPT_VERSION="3.10.1"
+SCRIPT_VERSION="3.11.0"
 DIR=/etc/sing-box
 ENV_FILE=$DIR/sb.env
 CONF=$DIR/config.json
@@ -148,22 +148,28 @@ node_ips() { # 按 IP_MODE 输出“地址 后缀”：auto=优先 v4，4/6=只�
 load_env() {
   [ -f "$ENV_FILE" ] || return 0
   . "$ENV_FILE"
-  # 3.8.3 起端口偏移按协议顺序排列；旧安装把原来推算出的端口写死，升级后端口不变
-  if [ "${PORT_LAYOUT:-1}" != 2 ] && [ -n "${PORT:-}" ]; then
-    local k o
-    for k in REALITY_PORT:0 HY2_PORT:1 TUIC_PORT:2 ANYTLS_PORT:3 SOCKS_PORT:4 SS_PORT:5 TROJAN_PORT:6 VMESS_PORT:7 SHADOWTLS_PORT:8; do
+  # 端口布局：1=旧偏移，2=3.8.3 固定偏移，3=3.11.0 起按已启用协议连续分配。
+  # 旧安装把原来推算出的端口写死，升级后端口不变
+  if [ "${PORT_LAYOUT:-1}" != 3 ] && [ -n "${PORT:-}" ]; then
+    local k o map
+    if [ "${PORT_LAYOUT:-1}" = 2 ]; then
+      map="HY2_PORT:0 REALITY_PORT:1 TUIC_PORT:2 TROJAN_PORT:3 VMESS_PORT:4 SS_PORT:5 ANYTLS_PORT:6 SHADOWTLS_PORT:7 SOCKS_PORT:8"
+    else
+      map="REALITY_PORT:0 HY2_PORT:1 TUIC_PORT:2 ANYTLS_PORT:3 SOCKS_PORT:4 SS_PORT:5 TROJAN_PORT:6 VMESS_PORT:7 SHADOWTLS_PORT:8"
+    fi
+    for k in $map; do
       o=${k#*:}; k=${k%%:*}
       [ -n "${!k:-}" ] || printf -v "$k" '%s' "$((PORT + o))"
     done
   fi
-  PORT_LAYOUT=2
+  PORT_LAYOUT=3
 }
 
 save_env() {
   local k
   umask 077
   {
-    echo "PORT_LAYOUT=2"
+    echo "PORT_LAYOUT=3"
     for k in UUID PORT $PORT_KEYS PROTOCOLS IP_MODE SNI ARGO_PORT ARGO_TOKEN ARGO_DOMAIN CFIP CFPORT NAME TUNE CERT_CUSTOM \
              REALITY_PRIVATE REALITY_PUBLIC REALITY_SID SS_PASSWORD STLS_INNER_PORT ARGO_IN_PORT SUB SUB_TOKEN SUB_PORT SB_VERSION \
              WARP WARP_DOMAINS WARP_PRIV WARP_V4 WARP_V6 WARP_PEER WARP_RES WARP_EP; do
@@ -176,20 +182,21 @@ save_env() {
 on() { [[ ",$PROTOCOLS," == *",$1,"* ]]; }
 sub_on() { on argo && [ "${SUB:-1}" != 0 ]; }
 
-# 各协议端口：单独设置优先，否则按 PORT 推算
+# 各协议端口：单独设置优先；未设置的按协议顺序从 PORT 起连续分配（只算已启用的，跳过被占用的）
 PORT_KEYS="HY2_PORT REALITY_PORT TUIC_PORT TROJAN_PORT VMESS_PORT SS_PORT ANYTLS_PORT SHADOWTLS_PORT SOCKS_PORT"
+pkey() { local k=${1^^}; echo "${k}_PORT"; }
 pt() {
-  case "$1" in
-    hy2)     echo "${HY2_PORT:-$PORT}" ;;
-    reality) echo "${REALITY_PORT:-$((PORT + 1))}" ;;
-    tuic)    echo "${TUIC_PORT:-$((PORT + 2))}" ;;
-    trojan)  echo "${TROJAN_PORT:-$((PORT + 3))}" ;;
-    vmess)   echo "${VMESS_PORT:-$((PORT + 4))}" ;;
-    ss)      echo "${SS_PORT:-$((PORT + 5))}" ;;
-    anytls)  echo "${ANYTLS_PORT:-$((PORT + 6))}" ;;
-    shadowtls) echo "${SHADOWTLS_PORT:-$((PORT + 7))}" ;;
-    socks)   echo "${SOCKS_PORT:-$((PORT + 8))}" ;;
-  esac
+  local k x n=${PORT:-0} used=" ${ARGO_PORT:-} "
+  k=$(pkey "$1"); [ -n "${!k:-}" ] && { echo "${!k}"; return; }
+  on "$1" || return 0
+  for x in $DIRECT; do k=$(pkey "$x"); on "$x" && [ -n "${!k:-}" ] && used+="${!k} "; done
+  for x in $DIRECT; do
+    on "$x" || continue
+    k=$(pkey "$x"); [ -n "${!k:-}" ] && continue
+    while [[ "$used" == *" $n "* ]]; do n=$((n + 1)); done
+    [ "$x" = "$1" ] && { echo "$n"; return; }
+    used+="$n "
+  done
 }
 
 check_ports() { # 已启用协议的端口必须合法且互不冲突
@@ -803,7 +810,8 @@ install_self() {
 do_set() { # KEY=VAL ...
   need_root; detect_init; load_env
   [ -f "$ENV_FILE" ] || die "尚未安装"
-  local kv k v p only_view=1
+  local kv k v p only_view=1 x before=""
+  for x in $DIRECT; do on "$x" && before+="$x:$(pt "$x") "; done
   for kv in "$@"; do
     k=${kv%%=*}; v=${kv#*=}
     case "$k" in IP_MODE|NAME|CFIP|CFPORT) ;; *) only_view=0 ;; esac
@@ -826,6 +834,9 @@ do_set() { # KEY=VAL ...
     esac
   done
   check_ports
+  for x in $before; do  # 协议增减会让自动分配的端口重新连续排列，提示变动
+    p=$(pt "${x%%:*}"); [ -n "$p" ] && [ "$p" != "${x#*:}" ] && warn "${x%%:*} 端口 ${x#*:} → $p，需重新导入该节点"
+  done
   if on argo && [ -n "${ARGO_TOKEN:-}" ] && [ -z "${ARGO_DOMAIN:-}" ]; then die "固定隧道需要 ARGO_DOMAIN"; fi
   if [ "$only_view" = 1 ]; then save_env  # 只影响节点显示，不重启（避免临时隧道换域名）
   else apply; fi
