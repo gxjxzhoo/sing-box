@@ -72,7 +72,7 @@
       <main class="main">
         <section class="hero">
           <div class="hero__copy">
-            <p class="hero__eyebrow">纯本地生成 · 不联网 · 脚本 v3.10.1</p>
+            <p class="hero__eyebrow">纯本地生成 · 不联网 · 脚本 v3.12.0</p>
             <h1>sing-box 一键安装命令生成器</h1>
             <p class="hero__sub">勾选协议与参数，生成一条命令，复制到 VPS 以 root 运行。</p>
           </div>
@@ -159,13 +159,27 @@
               <div class="x-grid">
                 <div class="x-field">
                   <label for="cfip">CFIP <small>可选</small></label>
-                  <input class="x-input" id="cfip" type="text" spellcheck="false" placeholder="saas.sin.fan" />
+                  <div class="x-row">
+                    <input class="x-input" id="cfip" type="text" spellcheck="false" placeholder="saas.sin.fan" />
+                    <button type="button" class="btn" id="cfipAuto">auto</button>
+                  </div>
+                  <p class="x-hint">auto = 安装时测速选最快。</p>
                 </div>
                 <div class="x-field">
                   <label for="cfport">CFPORT <small>可选</small></label>
                   <input class="x-input" id="cfport" type="text" inputmode="numeric" placeholder="443" />
                 </div>
               </div>
+              <div class="x-field">
+                <label for="cfipList">CFIP_LIST <small>可选，逗号分隔</small></label>
+                <input class="x-input" id="cfipList" type="text" spellcheck="false" placeholder="留空 = 内置列表" />
+                <p class="x-hint">内置：saas.sin.fan, cf.090227.xyz, cf.877774.xyz, cloudflare.182682.xyz, www.visa.com.sg, www.visa.com, time.is, icook.hk, www.shopify.com</p>
+              </div>
+              <div class="x-field">
+                <label class="x-switch">ARGO_MULTI 多优选节点 <input type="checkbox" id="argoMulti" role="switch" /></label>
+                <p class="x-hint">开启后，列表里每个优选地址额外输出一个 Argo VLESS 节点，交给客户端测延迟挑选。</p>
+              </div>
+              <p class="fineprint">VPS 测速仅供参考，真正优选以客户端延迟为准。</p>
             </div>
 
             <div class="x-panel">
@@ -186,8 +200,26 @@
                     </select>
                   </div>
                   <div class="x-field" id="sniBox">
-                    <label for="sni">SNI <small>Reality 偷取站点</small></label>
-                    <input class="x-input" id="sni" type="text" spellcheck="false" placeholder="www.iij.ad.jp" />
+                    <label for="sniSel">SNI <small>Reality 偷取站点</small></label>
+                    <select class="x-input" id="sniSel">
+                      <option value="auto">auto（安装时检测，选延迟最低）</option>
+                      <option value="random">random（检测后随机选一个可用的）</option>
+                      <option value="www.iij.ad.jp" selected>www.iij.ad.jp（默认）</option>
+                      <option>www.apple.com</option>
+                      <option>gateway.icloud.com</option>
+                      <option>swdist.apple.com</option>
+                      <option>www.microsoft.com</option>
+                      <option>dl.google.com</option>
+                      <option>www.amazon.com</option>
+                      <option>addons.mozilla.org</option>
+                      <option>www.nvidia.com</option>
+                      <option>www.samsung.com</option>
+                      <option>www.tesla.com</option>
+                      <option>www.lovelive-anime.jp</option>
+                      <option value="custom">自定义…</option>
+                    </select>
+                    <input class="x-input" id="sni" type="text" spellcheck="false" placeholder="例如 www.example.com" aria-label="自定义 SNI" hidden />
+                    <p class="x-hint">检测标准：TLS1.3 + X25519（有 H2 优先），检测在 VPS 上进行。</p>
                   </div>
                   <div class="x-field">
                     <label for="ver">SB_VERSION <small>固定内核版本</small></label>
@@ -224,6 +256,8 @@
             <div class="x-panel"><p>查看节点 / 订阅</p><div class="x-row"><pre class="x-code">sb nodes</pre><button type="button" class="btn" data-copy>复制</button></div></div>
             <div class="x-panel"><p>运行状态</p><div class="x-row"><pre class="x-code">sb status</pre><button type="button" class="btn" data-copy>复制</button></div></div>
             <div class="x-panel"><p>更新脚本并自动刷新配置</p><div class="x-row"><pre class="x-code">sb upgrade</pre><button type="button" class="btn" data-copy>复制</button></div></div>
+            <div class="x-panel"><p>检测 Reality SNI 候选</p><div class="x-row"><pre class="x-code">sb sni</pre><button type="button" class="btn" data-copy>复制</button></div></div>
+            <div class="x-panel"><p>测速 Argo 优选地址</p><div class="x-row"><pre class="x-code">sb cfip</pre><button type="button" class="btn" data-copy>复制</button></div></div>
             <div class="x-panel"><p>改优选地址</p><div class="x-row"><pre class="x-code">sb set CFIP=地址 CFPORT=443</pre><button type="button" class="btn" data-copy>复制</button></div></div>
             <div class="x-panel"><p>改 Argo 本地端口</p><div class="x-row"><pre class="x-code">sb set ARGO_PORT=8001</pre><button type="button" class="btn" data-copy>复制</button></div></div>
             <div class="x-panel"><p>卸载</p><div class="x-row"><pre class="x-code">sb uninstall</pre><button type="button" class="btn" data-copy>复制</button></div></div>
@@ -234,16 +268,17 @@
           <div class="head"><h2>sb 菜单速查</h2></div>
           <div class="prose">
             <ol>
-              <li>节点 / 订阅</li>
-              <li>协议</li>
-              <li>端口</li>
-              <li>UUID</li>
+              <li>查看节点 / 订阅</li>
+              <li>选择协议</li>
+              <li>修改端口</li>
+              <li>修改 UUID</li>
               <li>节点 IP</li>
-              <li>Argo 隧道 / 订阅（含改本地端口、优选地址）</li>
+              <li>Argo 隧道 / 订阅（含测速自动优选、编辑优选列表、多优选节点开关）</li>
+              <li>Reality SNI（检测、自动、随机、从列表选、手动、编辑列表）</li>
               <li>WARP 出站</li>
               <li>重启</li>
               <li>更新</li>
-              <li>重装（保留设置）</li>
+              <li>重装</li>
               <li>卸载</li>
             </ol>
           </div>
@@ -321,6 +356,7 @@
           $("argoPanel").hidden = !argo;
           $("fixedBox").hidden = !fixed;
           $("sniBox").hidden = !has("reality");
+          $("sni").hidden = $("sniSel").value !== "custom";
           $("allBtn").textContent = sel.length === P.length ? "取消全选" : "全选";
 
           $("protoErr").textContent = sel.length ? "" : "请至少选择一个协议";
@@ -393,10 +429,16 @@
             if (!$("sub").checked) env.push(["SUB", "0"]);
             add("CFIP", val("cfip"));
             add("CFPORT", val("cfport"));
+            add("CFIP_LIST", val("cfipList").split(",").map(function (s) { return s.trim(); }).filter(Boolean).join(","));
+            if ($("argoMulti").checked) env.push(["ARGO_MULTI", "1"]);
           }
           add("NAME", val("name"));
           if ($("ipMode").value !== "auto") add("IP_MODE", $("ipMode").value);
-          if (has("reality")) add("SNI", val("sni"));
+          if (has("reality")) {
+            var sv = $("sniSel").value;
+            if (sv === "custom") sv = val("sni");
+            if (sv !== "www.iij.ad.jp") add("SNI", sv);
+          }
           add("SB_VERSION", val("ver"));
           if (!$("tune").checked) env.push(["TUNE", "0"]);
 
@@ -419,6 +461,7 @@
         $("defBtn").onclick = function () { P.forEach(function (p) { p.cb.checked = DEF.indexOf(p.k) > -1; }); update(); };
         $("uuidBtn").onclick = function () { $("uuid").value = uuid(); update(); };
         $("portBtn").onclick = function () { $("port").value = rport(); update(); };
+        $("cfipAuto").onclick = function () { $("cfip").value = "auto"; update(); };
         $("tokBtn").onclick = function () {
           var i = $("argoToken"), show = i.type === "password";
           i.type = show ? "text" : "password";
