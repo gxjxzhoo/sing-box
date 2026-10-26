@@ -7,6 +7,7 @@
 #   bash sb.sh              交互菜单
 #   bash sb.sh install      安装（可用环境变量免交互，见下）
 #   bash sb.sh nodes        查看节点
+#   bash sb.sh sni|cfip     检测 Reality SNI 候选 / 测速 Argo 优选地址
 #   bash sb.sh set KEY=VAL  修改设置并重建（如 UUID=... PORT=... HY2_PORT=... ARGO_TOKEN=...）
 #   bash sb.sh restart|status|update|upgrade|uninstall   （upgrade=更新本脚本）
 #
@@ -16,12 +17,15 @@
 #   PROTOCOLS   要启用的协议，逗号分隔，默认 argo,hy2,reality；可加 tuic,trojan,vmess,ss,anytls,shadowtls,socks
 #   Argo        同时输出 vless/vmess/trojan 三个节点；本地 Nginx 只听 127.0.0.1:ARGO_PORT 按路径分流，订阅同端口
 #   UUID        默认随机
-#   SNI         Reality 偷取的站点，默认 www.iij.ad.jp
+#   SNI         Reality 偷取的站点，默认 www.iij.ad.jp；设为 auto（检测后选延迟最低）或 random（检测后随机选）
+#   SNI_LIST    SNI 候选列表，逗号分隔（留空=内置热门列表），供 auto/random 与 sb sni 检测使用
 #   ARGO_PORT   Argo 本地端口（只监听 127.0.0.1），默认 8001（被占用则随机）
 #   ARGO_TOKEN  固定隧道 Token（不填则用临时隧道 trycloudflare）
 #   ARGO_DOMAIN 固定隧道绑定的域名（固定隧道必填）
 #   SUB         Argo 订阅：1 开启（默认）/0 关闭；只通过 Argo 域名访问，不开公网端口
-#   CFIP/CFPORT Argo 节点的优选地址/端口，默认 saas.sin.fan / 443
+#   CFIP/CFPORT Argo 节点的优选地址/端口，默认 saas.sin.fan / 443；CFIP=auto 测速后选最快
+#   CFIP_LIST   优选地址候选列表，逗号分隔（留空=内置列表），供 sb cfip 测速与 ARGO_MULTI 使用
+#   ARGO_MULTI  1=列表里每个优选地址都额外输出一个 Argo VLESS 节点，交给客户端测延迟挑选；默认 0
 #   NAME        节点名前缀，默认主机名
 #   IP_MODE     节点用哪个 IP：auto（优先 v4）/4/6/both，默认 auto
 #   SB_VERSION  固定 sing-box 版本（需 ≥1.12，如 1.12.9），默认最新正式版
@@ -33,7 +37,7 @@
 set -o pipefail
 export LANG=en_US.UTF-8
 
-SCRIPT_VERSION="3.11.0"
+SCRIPT_VERSION="3.12.0"
 DIR=/etc/sing-box
 ENV_FILE=$DIR/sb.env
 CONF=$DIR/config.json
@@ -46,6 +50,9 @@ SCRIPT_URL=${SCRIPT_URL:-https://raw.githubusercontent.com/gxjxzhoo/sing-box/mai
 ALL_PROTOCOLS="argo,hy2,reality,tuic,trojan,vmess,ss,anytls,shadowtls,socks"  # 按热度排序（菜单字母 a-j 即此顺序）
 DIRECT="hy2 reality tuic trojan vmess ss anytls shadowtls socks"
 DEFAULT_PROTOCOLS="argo,hy2,reality"
+# Reality 热门 SNI（需支持 TLS1.3 + H2 + X25519）与 Argo 常用优选地址
+DEF_SNI_LIST="www.iij.ad.jp,www.apple.com,gateway.icloud.com,swdist.apple.com,www.microsoft.com,dl.google.com,www.amazon.com,addons.mozilla.org,www.nvidia.com,www.samsung.com,www.tesla.com,www.lovelive-anime.jp"
+DEF_CFIP_LIST="saas.sin.fan,cf.090227.xyz,cf.877774.xyz,cloudflare.182682.xyz,www.visa.com.sg,www.visa.com,time.is,icook.hk,www.shopify.com"
 
 # ---------- 输出 ----------
 c() { printf '\033[%sm%s\033[0m\n' "$1" "$2"; }
@@ -170,7 +177,7 @@ save_env() {
   umask 077
   {
     echo "PORT_LAYOUT=3"
-    for k in UUID PORT $PORT_KEYS PROTOCOLS IP_MODE SNI ARGO_PORT ARGO_TOKEN ARGO_DOMAIN CFIP CFPORT NAME TUNE CERT_CUSTOM \
+    for k in UUID PORT $PORT_KEYS PROTOCOLS IP_MODE SNI SNI_LIST ARGO_PORT ARGO_TOKEN ARGO_DOMAIN CFIP CFPORT CFIP_LIST ARGO_MULTI NAME TUNE CERT_CUSTOM \
              REALITY_PRIVATE REALITY_PUBLIC REALITY_SID SS_PASSWORD STLS_INNER_PORT ARGO_IN_PORT SUB SUB_TOKEN SUB_PORT SB_VERSION \
              WARP WARP_DOMAINS WARP_PRIV WARP_V4 WARP_V6 WARP_PEER WARP_RES WARP_EP; do
       printf '%s=%q\n' "$k" "${!k:-}"
@@ -377,6 +384,62 @@ warp_route() { # 输出 route 对象
     {final:(if $m == "all" then "warp" else "direct" end), default_domain_resolver:"local"}
     + (if $m == "ai" then {rules:[{action:"sniff"},
          {domain_suffix:($d|split(",")|map(select(. != ""))), outbound:"warp"}]} else {} end)'
+}
+
+# ---------- Reality SNI 检测 / Argo 优选测速 ----------
+# 都在本机（VPS）上测：SNI 的握手本来就是 VPS 连目标站，所以本机结果有效；
+# 优选地址关系的是客户端到 CF 的线路，本机测速只能看可用性，最终以客户端测延迟为准（可开 ARGO_MULTI）
+sni_test() { # 域名 → "延迟ms 结果"：ok=TLS1.3+X25519+H2，ok-noh2=可用但无 H2，其他=不可用原因
+  local h=$1 out ms why=""
+  ms=$(curl -so /dev/null -m 6 --connect-timeout 4 -w '%{time_connect}' "https://$h" 2>/dev/null) || ms=""
+  [ -n "$ms" ] && [ "$ms" != 0.000000 ] || { echo "- 连不上"; return; }
+  ms=$(awk -v t="$ms" 'BEGIN{printf "%d", t*1000}')
+  out=$(timeout 8 openssl s_client -connect "$h:443" -servername "$h" -tls1_3 -alpn h2 </dev/null 2>&1)
+  grep -q 'TLSv1.3' <<<"$out" || why+="无TLS1.3 "
+  grep -qi 'X25519' <<<"$out" || why+="非X25519 "
+  [ -n "$why" ] && { echo "$ms $why"; return; }
+  grep -q 'ALPN protocol: h2' <<<"$out" && echo "$ms ok" || echo "$ms ok-noh2"  # 无 H2 可用但不优先
+}
+
+sni_scan() { # 输出可用的 "延迟 域名"，按延迟排序；verbose=1 时打印全部结果
+  local h r
+  for h in $(tr ',' ' ' <<<"${SNI_LIST:-$DEF_SNI_LIST}"); do
+    r=$(sni_test "$h")
+    if [ "${1:-0}" = 1 ]; then case "${r#* }" in
+      ok) printf '  %-26s ✓ %sms\n' "$h" "${r%% *}" ;; ok-noh2) printf '  %-26s ✓ %sms（无 H2）\n' "$h" "${r%% *}" ;;
+      *) printf '  %-26s ✗ %s\n' "$h" "${r#* }" ;; esac >&2; fi
+    case "${r#* }" in ok) echo "${r%% *} $h" ;; ok-noh2) echo "$((${r%% *} + 10000)) $h" ;; esac  # 无 H2 排后面
+  done | sort -n
+}
+
+sni_pick() { # auto=延迟最低 random=可用里随机
+  local list; info "检测 SNI 候选……" >&2
+  list=$(sni_scan 1); [ -n "$list" ] || die "没有可用的 SNI，检查网络或 SNI_LIST"
+  if [ "$1" = random ]; then list=$(shuf -n1 <<<"$list"); else list=$(head -1 <<<"$list"); fi
+  info "选用 SNI：${list#* }" >&2; echo "${list#* }"
+}
+
+cf_test() { # 优选地址 → "延迟ms 机房"，不通输出 "-"
+  local r ms colo
+  r=$(curl -s -m 6 --connect-timeout 4 -w '\n%{time_connect}' "https://$1/cdn-cgi/trace" 2>/dev/null) || { echo "-"; return; }
+  colo=$(sed -n 's/^colo=//p' <<<"$r"); [ -n "$colo" ] || { echo "-"; return; }
+  ms=$(awk -v t="$(tail -1 <<<"$r")" 'BEGIN{printf "%d", t*1000}')
+  echo "$ms $colo"
+}
+
+cf_scan() {
+  local h r
+  for h in $(tr ',' ' ' <<<"${CFIP_LIST:-$DEF_CFIP_LIST}"); do
+    r=$(cf_test "$h")
+    [ "${1:-0}" = 1 ] && printf '  %-26s %s\n' "$h" "$([ "$r" = - ] && echo "✗ 不通/非 CF" || echo "✓ ${r%% *}ms ${r#* }")" >&2
+    [ "$r" = - ] || echo "${r%% *} $h"
+  done | sort -n
+}
+
+cfip_pick() {
+  local list; info "测速优选地址（本机测，仅供参考）……" >&2
+  list=$(cf_scan 1); [ -n "$list" ] || die "候选地址都不通，检查网络或 CFIP_LIST"
+  list=$(head -1 <<<"$list"); info "选用优选地址：${list#* }" >&2; echo "${list#* }"
 }
 
 # ---------- 生成配置 ----------
@@ -673,6 +736,13 @@ show_nodes() {
         echo "vless://$UUID@$CFIP:$CFPORT?encryption=none&security=tls&sni=$host&fp=chrome&type=ws&host=$host&path=%2Fargo%3Fed%3D2560#$n-argo-vless"
         echo "vmess://$(vmess_b64 "${NAME}-argo-vmess" "$CFIP" "$CFPORT" "$host" "/argo-vm?ed=2560" tls)"
         echo "trojan://$UUID@$CFIP:$CFPORT?security=tls&sni=$host&fp=chrome&type=ws&host=$host&path=%2Fargo-tr%3Fed%3D2560#$n-argo-trojan"
+        if [ "${ARGO_MULTI:-0}" = 1 ]; then  # 每个候选优选地址一个 VLESS 节点，客户端测延迟挑
+          local a
+          for a in $(tr ',' ' ' <<<"${CFIP_LIST:-$DEF_CFIP_LIST}"); do
+            [ "$a" = "$CFIP" ] && continue
+            echo "vless://$UUID@$a:$CFPORT?encryption=none&security=tls&sni=$host&fp=chrome&type=ws&host=$host&path=%2Fargo%3Fed%3D2560#$n-argo-$a"
+          done
+        fi
       else
         warn "未获取到 Argo 域名，稍后执行 sb nodes 再试" >&2
       fi
@@ -739,7 +809,7 @@ do_install() {
   if [ -f "$ENV_FILE" ]; then
     warn "检测到已安装，将保留现有设置重新安装（命令行传入的变量优先）"
     local k ov=()
-    for k in UUID PORT $PORT_KEYS PROTOCOLS IP_MODE SUB SNI ARGO_PORT ARGO_TOKEN ARGO_DOMAIN CFIP CFPORT NAME SB_VERSION TUNE CERT_B64 KEY_B64 WARP WARP_DOMAINS; do
+    for k in UUID PORT $PORT_KEYS PROTOCOLS IP_MODE SUB SNI SNI_LIST ARGO_PORT ARGO_TOKEN ARGO_DOMAIN CFIP CFPORT CFIP_LIST ARGO_MULTI NAME SB_VERSION TUNE CERT_B64 KEY_B64 WARP WARP_DOMAINS; do
       [ -n "${!k+x}" ] && ov+=("$k=${!k}")
     done
     load_env
@@ -758,6 +828,8 @@ do_install() {
   SNI=${SNI:-www.iij.ad.jp}
   CFIP=${CFIP:-saas.sin.fan}
   CFPORT=${CFPORT:-443}
+  case "$SNI" in auto|random) SNI=$(sni_pick "$SNI"); SNI=${SNI:-www.iij.ad.jp} ;; esac
+  [ "$CFIP" = auto ] && { CFIP=$(cfip_pick); CFIP=${CFIP:-saas.sin.fan}; }
   NAME=${NAME:-$(hostname | cut -c1-20)}
   if [ -z "${PORT:-}" ] && [ -t 0 ]; then
     # 交互安装：逐个询问已选直连协议的端口，回车随机
@@ -814,7 +886,7 @@ do_set() { # KEY=VAL ...
   for x in $DIRECT; do on "$x" && before+="$x:$(pt "$x") "; done
   for kv in "$@"; do
     k=${kv%%=*}; v=${kv#*=}
-    case "$k" in IP_MODE|NAME|CFIP|CFPORT) ;; *) only_view=0 ;; esac
+    case "$k" in IP_MODE|NAME|CFIP|CFPORT|CFIP_LIST|ARGO_MULTI) ;; *) only_view=0 ;; esac
     case "$k" in
       PROTOCOLS) for p in ${v//,/ }; do [[ ",$ALL_PROTOCOLS," == *",$p,"* ]] || die "未知协议：$p"; done; PROTOCOLS=$v ;;
       SUB) case "$v" in 0|1) SUB=$v ;; *) die "SUB 只能是 0 或 1" ;; esac ;;
@@ -826,7 +898,11 @@ do_set() { # KEY=VAL ...
       SUB_TOKEN) [ -n "$v" ] || v=$(openssl rand -hex 12); [[ "$v" =~ ^[A-Za-z0-9_-]{8,64}$ ]] || die "SUB_TOKEN 需 8-64 位字母数字"; rm -rf "$DIR/sub"; SUB_TOKEN=$v ;;
       IP_MODE) case "$v" in auto|4|6|both) IP_MODE=$v ;; *) die "IP_MODE 只能是 auto/4/6/both" ;; esac ;;
       UUID) valid_uuid "$v" || die "UUID 格式不对：$v"; UUID=$v ;;
-      SNI|CFIP|CFPORT|NAME|ARGO_DOMAIN|ARGO_TOKEN) printf -v "$k" '%s' "$v" ;;
+      SNI) case "$v" in auto|random) v=$(sni_pick "$v") ;; esac; [ -n "$v" ] || die "SNI 不能为空"; SNI=$v ;;
+      CFIP) [ "$v" = auto ] && v=$(cfip_pick); [ -n "$v" ] || die "CFIP 不能为空"; CFIP=$v ;;
+      SNI_LIST|CFIP_LIST) printf -v "$k" '%s' "${v// /}" ;;
+      ARGO_MULTI) case "$v" in 0|1) ARGO_MULTI=$v ;; *) die "ARGO_MULTI 只能是 0 或 1" ;; esac ;;
+      CFPORT|NAME|ARGO_DOMAIN|ARGO_TOKEN) printf -v "$k" '%s' "$v" ;;
       PORT|ARGO_PORT) valid_port "$v" || die "端口无效：$v"; printf -v "$k" '%s' "$v" ;;
       REALITY_PORT|HY2_PORT|TUIC_PORT|ANYTLS_PORT|SOCKS_PORT|SS_PORT|TROJAN_PORT|VMESS_PORT|SHADOWTLS_PORT)
         [ -z "$v" ] || valid_port "$v" || die "端口无效：$v"; printf -v "$k" '%s' "$v" ;;
@@ -956,7 +1032,7 @@ argo_menu() {
   on argo || { warn "未启用 Argo，请先在「选择协议」里勾选"; return; }
   local t="临时隧道"; [ -n "${ARGO_TOKEN:-}" ] && t="固定隧道（$ARGO_DOMAIN）"
   echo "  隧道：$t   订阅：$(sub_on && echo 开启 || echo 关闭)"
-  printf '  %s\n' "1. 设置固定隧道" "2. 改回临时隧道" "3. 订阅开/关" "4. 更换订阅令牌" "5. 修改本地端口（当前 $ARGO_PORT）" "6. 修改优选地址/端口（当前 $CFIP:$CFPORT）" "0. 返回"
+  printf '  %s\n' "1. 设置固定隧道" "2. 改回临时隧道" "3. 订阅开/关" "4. 更换订阅令牌" "5. 修改本地端口（当前 $ARGO_PORT）" "6. 修改优选地址/端口（当前 $CFIP:$CFPORT）" "7. 测速并自动选优选地址" "8. 编辑优选地址列表" "9. 多优选节点（当前：$([ "${ARGO_MULTI:-0}" = 1 ] && echo 开 || echo 关)）" "0. 返回"
   case "$(ask "请选择" "")" in
     1) do_set "ARGO_TOKEN=$(ask "隧道 Token" "")" "ARGO_DOMAIN=$(ask "隧道域名" "${ARGO_DOMAIN:-}")" ;;
     2) do_set "ARGO_TOKEN=" "ARGO_DOMAIN=" ;;
@@ -964,6 +1040,26 @@ argo_menu() {
     4) do_set SUB_TOKEN= ;;
     5) argo_port_set ;;
     6) do_set "CFIP=$(ask "优选地址（域名或 IP）" "$CFIP")" "CFPORT=$(ask "优选端口" "$CFPORT")" ;;
+    7) do_set CFIP=auto ;;
+    8) do_set "CFIP_LIST=$(ask "逗号分隔（留空=内置列表）" "${CFIP_LIST:-$DEF_CFIP_LIST}")" ;;
+    9) if [ "${ARGO_MULTI:-0}" = 1 ]; then do_set ARGO_MULTI=0; else do_set ARGO_MULTI=1; fi ;;
+  esac
+}
+
+sni_menu() {
+  on reality || { warn "未启用 Reality"; return; }
+  echo "  当前 SNI：$SNI"
+  printf '  %s\n' "1. 检测候选 SNI 可用性" "2. 自动选延迟最低的" "3. 随机选一个可用的" "4. 从列表里选" "5. 手动输入" "6. 编辑候选列表" "0. 返回"
+  case "$(ask "请选择" "")" in
+    1) sni_scan 1 >/dev/null; echo "  当前 $SNI：$(sni_test "$SNI")" ;;
+    2) do_set SNI=auto ;;
+    3) do_set SNI=random ;;
+    4) local l i=1 x; l=$(tr ',' ' ' <<<"${SNI_LIST:-$DEF_SNI_LIST}")
+       for x in $l; do echo "  $i. $x"; i=$((i + 1)); done
+       i=$(ask "编号" ""); x=$(awk -v n="$i" '{print $n}' <<<"$l"); [ -n "$x" ] && do_set "SNI=$x" || warn "无效选项" ;;
+    5) local x; x=$(ask "SNI 域名" ""); [ -n "$x" ] || return
+       info "检测 $x：$(sni_test "$x")（ok 才建议使用）"; do_set "SNI=$x" ;;
+    6) do_set "SNI_LIST=$(ask "逗号分隔（留空=内置列表）" "${SNI_LIST:-$DEF_SNI_LIST}")" ;;
   esac
 }
 
@@ -1041,12 +1137,13 @@ menu() {
  4. 修改 UUID
  5. 节点 IP（v4/v6）
  6. Argo 隧道 / 订阅
- 7. WARP 出站
+ 7. Reality SNI
+ 8. WARP 出站
  ─── 维护 ───
- 8. 重启
- 9. 更新
-10. 重装（保留设置）
-11. 卸载
+ 9. 重启
+10. 更新
+11. 重装（保留设置）
+12. 卸载
  0. 退出
 EOF
     x=$(ask "请选择" "")
@@ -1058,11 +1155,12 @@ EOF
       4) x=$(ask "新 UUID（回车随机生成）" ""); do_set "UUID=${x:-$(cat /proc/sys/kernel/random/uuid)}" ;;
       5) ip_menu ;;
       6) argo_menu ;;
-      7) warp_menu ;;
-      8) do_restart ;;
-      9) update_menu ;;
-      10) do_install ;;
-      11) [ "$(ask "确认卸载？输入 y" "")" = y ] && do_uninstall ;;
+      7) sni_menu ;;
+      8) warp_menu ;;
+      9) do_restart ;;
+      10) update_menu ;;
+      11) do_install ;;
+      12) [ "$(ask "确认卸载？输入 y" "")" = y ] && do_uninstall ;;
       *) warn "无效选项" ;;
     esac )  # 子 shell：某项出错只返回菜单，不退出
   done
@@ -1071,6 +1169,8 @@ EOF
 case "${1:-menu}" in
   install)   do_install ;;
   nodes)     show_nodes ;;
+  sni)       load_env; sni_scan 1 >/dev/null ;;
+  cfip)      load_env; cf_scan 1 >/dev/null ;;
   set)       shift; do_set "$@" ;;
   restart)   do_restart ;;
   status)    do_status ;;
